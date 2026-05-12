@@ -93,7 +93,8 @@ function bindMcpContentEvents(mcpContent) {
           if (resp && resp.ok) {
             setTimeout(function () { refreshMcpStatusBar(mcpContent); }, 500);
           } else {
-            showToast('MCP \u542F\u52A8\u5931\u8D25');
+            showToast('MCP \u542F\u52A8\u5931\u8D25: ' + ((resp && resp.error) || '\u672A\u77E5\u9519\u8BEF'));
+            setTimeout(function () { refreshMcpStatusBar(mcpContent); }, 200);
           }
         });
       } else {
@@ -237,7 +238,7 @@ function refreshMcpStatusBar(mcpContent) {
       btnEl.className = 'ai-req-mcp-start-btn ai-req-mcp-stop-btn';
     } else {
       dotEl.className = 'ai-req-mcp-status-dot ai-req-mcp-status-dot-off';
-      textEl.textContent = 'MCP \u25CB \u672A\u542F\u52A8';
+      textEl.textContent = 'MCP \u25CB \u672A\u542F\u52A8' + (resp && resp.helperError ? '\uFF08' + resp.helperError + '\uFF09' : '');
       btnEl.textContent = '\u542F\u52A8';
       btnEl.className = 'ai-req-mcp-start-btn';
     }

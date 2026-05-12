@@ -78,6 +78,10 @@ async function listenStdin() {
 
 function handleNMMessage(msg) {
   switch (msg.type) {
+    case 'PING': {
+      writeNMMessage({ type: 'PONG' });
+      break;
+    }
     case 'SYNC_TOOLS': {
       // 同步工具定义，仅保留 enabled 的工具
       const toolsObj = msg.tools || {};

@@ -10,31 +10,94 @@ const __dirname = path.dirname(__filename);
 const HOST_NAME = 'com.aireq.mcp_helper';
 const EXTENSION_ID = 'njgfblgbmbhkegiaopcpnikggdmieodc';
 const serverPath = path.resolve(__dirname, 'server.mjs');
-
 const nodePath = process.execPath;
 
-// 构建启动命令
-const launchCmd = `"${nodePath}" "${serverPath}"`;
-
-// 生成 manifest 内容
-const manifest = {
-  name: HOST_NAME,
-  description: 'AI Request Analyzer MCP Helper',
-  path: nodePath,
-  type: 'stdio',
-  allowed_origins: [
-    `chrome-extension://${EXTENSION_ID}/`,
-  ],
-};
-
-const manifestJson = JSON.stringify(manifest, null, 2);
-
 const platform = os.platform();
+
+function escapeCSharpString(str) {
+  return String(str).replace(/"/g, '""');
+}
+
+function buildWindowsLauncherSource() {
+  const escapedNodePath = escapeCSharpString(nodePath);
+  const escapedServerPath = escapeCSharpString(serverPath);
+  const escapedWorkingDir = escapeCSharpString(path.dirname(serverPath));
+  return `using System;
+using System.Diagnostics;
+using System.Collections.Generic;
+
+public static class Program {
+  public static int Main(string[] args) {
+    try {
+      var psi = new ProcessStartInfo();
+      psi.FileName = @"${escapedNodePath}";
+      psi.WorkingDirectory = @"${escapedWorkingDir}";
+      psi.UseShellExecute = false;
+      psi.Arguments = JoinArgs(BuildArgs(args));
+      using (var process = Process.Start(psi)) {
+        process.WaitForExit();
+        return process.ExitCode;
+      }
+    } catch (Exception ex) {
+      Console.Error.WriteLine(ex.ToString());
+      return 1;
+    }
+  }
+
+  private static string[] BuildArgs(string[] args) {
+    var list = new List<string>();
+    list.Add(@"${escapedServerPath}");
+    for (int i = 0; i < args.Length; i++) {
+      list.Add(args[i]);
+    }
+    return list.ToArray();
+  }
+
+  private static string JoinArgs(string[] args) {
+    var parts = new string[args.Length];
+    for (int i = 0; i < args.Length; i++) {
+      parts[i] = Quote(args[i]);
+    }
+    return string.Join(" ", parts);
+  }
+
+  private static string Quote(string arg) {
+    if (string.IsNullOrEmpty(arg)) return "\\\"\\\"";
+    if (arg.IndexOf(' ') < 0 && arg.IndexOf('\\t') < 0 && arg.IndexOf('\"') < 0) return arg;
+    return "\\\"" + arg.Replace("\\\\", "\\\\\\\\").Replace("\\\"", "\\\\\\\"") + "\\\"";
+  }
+}`;
+}
 
 function installWindows() {
   const manifestDir = path.join(__dirname);
   const manifestPath = path.join(manifestDir, `${HOST_NAME}.json`);
+  const launcherExePath = path.join(manifestDir, `${HOST_NAME}.exe`);
+  const launcherSourcePath = path.join(manifestDir, `${HOST_NAME}.launcher.cs`);
+  const launcherSource = buildWindowsLauncherSource();
+  const manifest = {
+    name: HOST_NAME,
+    description: 'AI Request Analyzer MCP Helper',
+    path: launcherExePath,
+    type: 'stdio',
+    allowed_origins: [
+      `chrome-extension://${EXTENSION_ID}/`,
+    ],
+  };
+  const manifestJson = JSON.stringify(manifest, null, 2);
 
+  fs.writeFileSync(launcherSourcePath, launcherSource, 'utf-8');
+  console.log(`[安装] 已写入 launcher 源码: ${launcherSourcePath}`);
+  try {
+    execSync(
+      `powershell -NoProfile -Command "Add-Type -Path '${launcherSourcePath.replace(/'/g, "''")}' -OutputAssembly '${launcherExePath.replace(/'/g, "''")}' -OutputType ConsoleApplication"`,
+      { encoding: 'utf-8', stdio: 'pipe' }
+    );
+    console.log(`[安装] 已编译 launcher: ${launcherExePath}`);
+  } catch (e) {
+    console.error(`[错误] launcher 编译失败: ${e.message}`);
+    process.exit(1);
+  }
   fs.writeFileSync(manifestPath, manifestJson, 'utf-8');
   console.log(`[安装] 已写入 manifest: ${manifestPath}`);
 
@@ -60,6 +123,16 @@ function installMac() {
     'NativeMessagingHosts',
   );
   const targetPath = path.join(targetDir, `${HOST_NAME}.json`);
+  const manifest = {
+    name: HOST_NAME,
+    description: 'AI Request Analyzer MCP Helper',
+    path: serverPath,
+    type: 'stdio',
+    allowed_origins: [
+      `chrome-extension://${EXTENSION_ID}/`,
+    ],
+  };
+  const manifestJson = JSON.stringify(manifest, null, 2);
 
   fs.mkdirSync(targetDir, { recursive: true });
   fs.writeFileSync(targetPath, manifestJson, 'utf-8');
@@ -74,6 +147,16 @@ function installLinux() {
     'NativeMessagingHosts',
   );
   const targetPath = path.join(targetDir, `${HOST_NAME}.json`);
+  const manifest = {
+    name: HOST_NAME,
+    description: 'AI Request Analyzer MCP Helper',
+    path: serverPath,
+    type: 'stdio',
+    allowed_origins: [
+      `chrome-extension://${EXTENSION_ID}/`,
+    ],
+  };
+  const manifestJson = JSON.stringify(manifest, null, 2);
 
   fs.mkdirSync(targetDir, { recursive: true });
   fs.writeFileSync(targetPath, manifestJson, 'utf-8');

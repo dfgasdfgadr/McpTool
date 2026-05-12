@@ -119,8 +119,9 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
   if (message.type === 'MCP_START_HELPER') {
     var cfgPort = (message.payload && message.payload.mcpPort) || 9527;
     mcpState.serverPort = cfgPort;
-    connectMcpHelper();
-    sendResponse({ ok: true, connected: mcpState.helperConnected });
+    connectMcpHelper(function (result) {
+      sendResponse(result);
+    });
     return true;
   }
 
@@ -140,7 +141,8 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
     sendResponse({
       helperConnected: mcpState.helperConnected,
       serverPort: mcpState.serverPort,
-      callLogCount: mcpState.callLogs.length
+      callLogCount: mcpState.callLogs.length,
+      helperError: mcpState.helperError
     });
     return true;
   }
@@ -162,7 +164,7 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
       for (var ki = 0; ki < storageKeys.length; ki++) {
         var key = storageKeys[ki];
         if (key.indexOf('ai_req_mcp_tools_') !== 0) continue;
-        var toolsObj = items[key];
+        var toolsObj = parseStoredTools(items[key]);
         if (toolsObj && toolsObj[testToolName]) {
           toolDef = toolsObj[testToolName];
           toolMeta = toolDef._meta || {};
@@ -301,34 +303,99 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
 var mcpState = {
   helperConnected: false,
   helperPort: null,
+  helperError: null,
+  helperStopping: false,
   tools: {},
   callLogs: [],
   pendingCalls: {},
   serverPort: 9527
 };
 
+function parseStoredTools(toolsVal) {
+  if (!toolsVal) return null;
+  if (typeof toolsVal === 'string') {
+    try {
+      return JSON.parse(toolsVal);
+    } catch (e) {
+      return null;
+    }
+  }
+  if (typeof toolsVal === 'object') return toolsVal;
+  return null;
+}
+
 function connectMcpHelper() {
+  var onDone = arguments[0];
+  var settled = false;
+  var connectTimeout = null;
+
+  function finish(result) {
+    if (settled) return;
+    settled = true;
+    if (connectTimeout) clearTimeout(connectTimeout);
+    if (typeof onDone === 'function') onDone(result);
+  }
+
+  disconnectMcpHelper();
+  mcpState.helperConnected = false;
+  mcpState.helperError = null;
+  mcpState.helperStopping = false;
+
   try {
     mcpState.helperPort = chrome.runtime.connectNative('com.aireq.mcp_helper');
-    mcpState.helperConnected = true;
-
-    mcpState.helperPort.onMessage.addListener(function (msg) {
-      handleHelperMessage(msg);
-    });
-
-    mcpState.helperPort.onDisconnect.addListener(function () {
-      mcpState.helperConnected = false;
-      mcpState.helperPort = null;
-    });
-
-    syncToolsToHelper();
   } catch (e) {
     mcpState.helperConnected = false;
+    mcpState.helperError = e && e.message ? e.message : 'Native Messaging Host 启动失败';
+    finish({ ok: false, connected: false, error: mcpState.helperError });
+    return;
+  }
+
+  connectTimeout = setTimeout(function () {
+    if (settled) return;
+    mcpState.helperConnected = false;
+    mcpState.helperError = 'Native Messaging Host 未响应，请确认已执行 install.mjs 并重启浏览器';
+    disconnectMcpHelper();
+    finish({ ok: false, connected: false, error: mcpState.helperError });
+  }, 2000);
+
+  mcpState.helperPort.onMessage.addListener(function (msg) {
+    if (msg && msg.type === 'PONG') {
+      mcpState.helperConnected = true;
+      mcpState.helperError = null;
+      syncToolsToHelper();
+      finish({ ok: true, connected: true, serverPort: mcpState.serverPort });
+      return;
+    }
+    handleHelperMessage(msg);
+  });
+
+  mcpState.helperPort.onDisconnect.addListener(function () {
+    var lastError = chrome.runtime.lastError ? chrome.runtime.lastError.message : '';
+    mcpState.helperConnected = false;
+    mcpState.helperPort = null;
+    if (mcpState.helperStopping) {
+      mcpState.helperStopping = false;
+      mcpState.helperError = null;
+      finish({ ok: false, connected: false, error: null });
+      return;
+    }
+    mcpState.helperError = lastError || 'Native Messaging Host 已断开';
+    finish({ ok: false, connected: false, error: mcpState.helperError });
+  });
+
+  try {
+    mcpState.helperPort.postMessage({ type: 'PING' });
+  } catch (e2) {
+    mcpState.helperConnected = false;
+    mcpState.helperError = e2 && e2.message ? e2.message : 'Native Messaging Host 通信失败';
+    disconnectMcpHelper();
+    finish({ ok: false, connected: false, error: mcpState.helperError });
   }
 }
 
 function disconnectMcpHelper() {
   if (mcpState.helperPort) {
+    mcpState.helperStopping = true;
     try {
       mcpState.helperPort.postMessage({ type: 'SHUTDOWN' });
     } catch (e) {}
@@ -336,6 +403,7 @@ function disconnectMcpHelper() {
     mcpState.helperPort = null;
   }
   mcpState.helperConnected = false;
+  mcpState.helperError = null;
 }
 
 function handleHelperMessage(msg) {
@@ -410,7 +478,7 @@ function handleMcpToolCall(callId, toolName, toolArguments) {
       var key = storageKeys[ki];
       if (key.indexOf('ai_req_mcp_tools_') !== 0) continue;
       var hostname = key.substring('ai_req_mcp_tools_'.length);
-      var toolsObj = items[key];
+      var toolsObj = parseStoredTools(items[key]);
       if (toolsObj && toolsObj[toolName]) {
         toolDef = toolsObj[toolName];
         toolMeta = toolDef._meta || {};
@@ -516,7 +584,7 @@ function syncToolsToHelper() {
     for (var ki = 0; ki < storageKeys.length; ki++) {
       var key = storageKeys[ki];
       if (key.indexOf('ai_req_mcp_tools_') !== 0) continue;
-      var toolsObj = items[key];
+      var toolsObj = parseStoredTools(items[key]);
       if (!toolsObj || typeof toolsObj !== 'object') continue;
       var tKeys = Object.keys(toolsObj);
       for (var ti = 0; ti < tKeys.length; ti++) {
