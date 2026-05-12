@@ -116,6 +116,131 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
     return true;
   }
 
+  if (message.type === 'MCP_START_HELPER') {
+    var cfgPort = (message.payload && message.payload.mcpPort) || 9527;
+    mcpState.serverPort = cfgPort;
+    connectMcpHelper();
+    sendResponse({ ok: true, connected: mcpState.helperConnected });
+    return true;
+  }
+
+  if (message.type === 'MCP_STOP_HELPER') {
+    disconnectMcpHelper();
+    sendResponse({ ok: true, connected: false });
+    return true;
+  }
+
+  if (message.type === 'MCP_SYNC_TOOLS') {
+    syncToolsToHelper();
+    sendResponse({ ok: true });
+    return true;
+  }
+
+  if (message.type === 'MCP_GET_STATUS') {
+    sendResponse({
+      helperConnected: mcpState.helperConnected,
+      serverPort: mcpState.serverPort,
+      callLogCount: mcpState.callLogs.length
+    });
+    return true;
+  }
+
+  if (message.type === 'MCP_GET_CALL_LOGS') {
+    sendResponse({ logs: mcpState.callLogs });
+    return true;
+  }
+
+  if (message.type === 'MCP_TOOL_TEST') {
+    var testToolName = message.toolName;
+    var testArgs = message.arguments || {};
+    var testStartTime = Date.now();
+
+    chrome.storage.local.get(null, function (items) {
+      var toolDef = null;
+      var toolMeta = null;
+      var storageKeys = Object.keys(items);
+      for (var ki = 0; ki < storageKeys.length; ki++) {
+        var key = storageKeys[ki];
+        if (key.indexOf('ai_req_mcp_tools_') !== 0) continue;
+        var toolsObj = items[key];
+        if (toolsObj && toolsObj[testToolName]) {
+          toolDef = toolsObj[testToolName];
+          toolMeta = toolDef._meta || {};
+          break;
+        }
+      }
+
+      if (!toolDef) {
+        sendResponse({ ok: false, error: 'Tool not found: ' + testToolName });
+        return;
+      }
+
+      var origin = toolMeta.origin || '';
+      var pathname = toolMeta.pathname || '';
+      var method = toolMeta.method || 'GET';
+      var sampleHeaders = toolMeta.sampleRequestHeaders || {};
+
+      var queryString = '';
+      var bodyData = {};
+      var argKeys = Object.keys(testArgs);
+      for (var ai = 0; ai < argKeys.length; ai++) {
+        var argKey = argKeys[ai];
+        if (argKey.charAt(0) === '_') continue;
+        var isInQuery = toolMeta.queryParams && toolMeta.queryParams.indexOf(argKey) >= 0;
+        if (isInQuery || method.toUpperCase() === 'GET') {
+          queryString += (queryString ? '&' : '?') + encodeURIComponent(argKey) + '=' + encodeURIComponent(String(testArgs[argKey]));
+        } else {
+          bodyData[argKey] = testArgs[argKey];
+        }
+      }
+
+      var fullUrl = origin + pathname + queryString;
+
+      findTargetTab(origin).then(function (tab) {
+        if (tab) {
+          var proxyPayload = {
+            callId: 'test_' + Date.now(),
+            toolName: testToolName,
+            url: fullUrl,
+            method: method,
+            headers: sampleHeaders,
+            body: bodyData,
+            timeout: 30000
+          };
+          chrome.tabs.sendMessage(tab.id, { type: 'MCP_PROXY_REQUEST', payload: proxyPayload }, function (response) {
+            addMcpCallLog({
+              timestamp: Date.now(),
+              toolName: testToolName,
+              argsSummary: JSON.stringify(testArgs).substring(0, 200),
+              status: (response && response.status) || 0,
+              duration: Date.now() - testStartTime,
+              proxyMode: 'test-tab',
+              error: (response && response.error) || null
+            });
+            sendResponse(response || { ok: false, error: 'No response from content script' });
+          });
+        } else {
+          fallbackFetch(toolMeta, fullUrl, method, sampleHeaders, bodyData).then(function (fbResult) {
+            addMcpCallLog({
+              timestamp: Date.now(),
+              toolName: testToolName,
+              argsSummary: JSON.stringify(testArgs).substring(0, 200),
+              status: fbResult.status || 0,
+              duration: Date.now() - testStartTime,
+              proxyMode: 'test-fallback',
+              error: fbResult.error || null
+            });
+            sendResponse(fbResult);
+          }).catch(function (err) {
+            sendResponse({ ok: false, error: err && err.message ? err.message : String(err) });
+          });
+        }
+      });
+    });
+
+    return true;
+  }
+
   if (message.type !== 'AI_CHAT_COMPLETIONS') return;
 
   var p = message.payload || {};
@@ -172,3 +297,241 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
 
   return true;
 });
+
+var mcpState = {
+  helperConnected: false,
+  helperPort: null,
+  tools: {},
+  callLogs: [],
+  pendingCalls: {},
+  serverPort: 9527
+};
+
+function connectMcpHelper() {
+  try {
+    mcpState.helperPort = chrome.runtime.connectNative('com.aireq.mcp_helper');
+    mcpState.helperConnected = true;
+
+    mcpState.helperPort.onMessage.addListener(function (msg) {
+      handleHelperMessage(msg);
+    });
+
+    mcpState.helperPort.onDisconnect.addListener(function () {
+      mcpState.helperConnected = false;
+      mcpState.helperPort = null;
+    });
+
+    syncToolsToHelper();
+  } catch (e) {
+    mcpState.helperConnected = false;
+  }
+}
+
+function disconnectMcpHelper() {
+  if (mcpState.helperPort) {
+    try {
+      mcpState.helperPort.postMessage({ type: 'SHUTDOWN' });
+    } catch (e) {}
+    mcpState.helperPort.disconnect();
+    mcpState.helperPort = null;
+  }
+  mcpState.helperConnected = false;
+}
+
+function handleHelperMessage(msg) {
+  if (!msg || !msg.type) return;
+  if (msg.type === 'CALL_REQUEST') {
+    handleMcpToolCall(msg.callId, msg.toolName, msg.arguments || {});
+  }
+}
+
+function findTargetTab(origin) {
+  return new Promise(function (resolve) {
+    chrome.tabs.query({ url: origin + '/*' }, function (tabs) {
+      if (!tabs || tabs.length === 0) {
+        resolve(null);
+        return;
+      }
+      tabs.sort(function (a, b) { return (b.lastAccessed || 0) - (a.lastAccessed || 0); });
+      resolve(tabs[0]);
+    });
+  });
+}
+
+function fallbackFetch(toolMeta, url, method, headers, body) {
+  var fetchHeaders = {};
+  if (headers && typeof headers === 'object') {
+    var hKeys = Object.keys(headers);
+    for (var hi = 0; hi < hKeys.length; hi++) {
+      fetchHeaders[hKeys[hi]] = headers[hKeys[hi]];
+    }
+  }
+  var fetchOpts = {
+    method: method || 'GET',
+    headers: fetchHeaders
+  };
+  if (method && method.toUpperCase() !== 'GET' && body && Object.keys(body).length > 0) {
+    fetchOpts.body = JSON.stringify(body);
+    if (!fetchHeaders['Content-Type']) {
+      fetchHeaders['Content-Type'] = 'application/json';
+    }
+  }
+  return fetch(url, fetchOpts).then(function (res) {
+    return res.text().then(function (text) {
+      var resHeaders = {};
+      res.headers.forEach(function (val, key) {
+        resHeaders[key] = val;
+      });
+      return {
+        ok: res.ok,
+        status: res.status,
+        headers: resHeaders,
+        body: text,
+        proxyMode: 'fallback'
+      };
+    });
+  }).catch(function (err) {
+    return {
+      ok: false,
+      status: 0,
+      error: err && err.message ? err.message : String(err),
+      proxyMode: 'fallback'
+    };
+  });
+}
+
+function handleMcpToolCall(callId, toolName, toolArguments) {
+  var startTime = Date.now();
+  chrome.storage.local.get(null, function (items) {
+    var toolDef = null;
+    var toolMeta = null;
+    var storageKeys = Object.keys(items);
+    for (var ki = 0; ki < storageKeys.length; ki++) {
+      var key = storageKeys[ki];
+      if (key.indexOf('ai_req_mcp_tools_') !== 0) continue;
+      var hostname = key.substring('ai_req_mcp_tools_'.length);
+      var toolsObj = items[key];
+      if (toolsObj && toolsObj[toolName]) {
+        toolDef = toolsObj[toolName];
+        toolMeta = toolDef._meta || {};
+        break;
+      }
+    }
+
+    if (!toolDef) {
+      var notFoundResult = { ok: false, error: 'Tool not found: ' + toolName, callId: callId };
+      addMcpCallLog({
+        timestamp: Date.now(),
+        toolName: toolName,
+        argsSummary: JSON.stringify(toolArguments).substring(0, 200),
+        status: 0,
+        duration: Date.now() - startTime,
+        proxyMode: 'none',
+        error: 'Tool not found'
+      });
+      if (mcpState.helperPort && mcpState.helperConnected) {
+        mcpState.helperPort.postMessage({ type: 'CALL_RESULT', callId: callId, result: notFoundResult });
+      }
+      return;
+    }
+
+    var origin = toolMeta.origin || '';
+    var pathname = toolMeta.pathname || '';
+    var method = toolMeta.method || 'GET';
+    var sampleHeaders = toolMeta.sampleRequestHeaders || {};
+
+    var queryString = '';
+    var bodyData = {};
+    var argKeys = Object.keys(toolArguments || {});
+    for (var ai = 0; ai < argKeys.length; ai++) {
+      var argKey = argKeys[ai];
+      if (argKey.charAt(0) === '_') continue;
+      var isInQuery = toolMeta.queryParams && toolMeta.queryParams.indexOf(argKey) >= 0;
+      if (isInQuery || method.toUpperCase() === 'GET') {
+        queryString += (queryString ? '&' : '?') + encodeURIComponent(argKey) + '=' + encodeURIComponent(String(toolArguments[argKey]));
+      } else {
+        bodyData[argKey] = toolArguments[argKey];
+      }
+    }
+
+    var fullUrl = origin + pathname + queryString;
+
+    findTargetTab(origin).then(function (tab) {
+      if (tab) {
+        var proxyPayload = {
+          callId: callId,
+          toolName: toolName,
+          url: fullUrl,
+          method: method,
+          headers: sampleHeaders,
+          body: bodyData,
+          timeout: 30000
+        };
+        chrome.tabs.sendMessage(tab.id, { type: 'MCP_PROXY_REQUEST', payload: proxyPayload }, function (response) {
+          var result = response || { ok: false, error: 'No response from content script', proxyMode: 'tab' };
+          result.callId = callId;
+
+          addMcpCallLog({
+            timestamp: Date.now(),
+            toolName: toolName,
+            argsSummary: JSON.stringify(toolArguments).substring(0, 200),
+            status: result.status || 0,
+            duration: Date.now() - startTime,
+            proxyMode: result.proxyMode || 'tab',
+            error: result.error || null
+          });
+
+          if (mcpState.helperPort && mcpState.helperConnected) {
+            mcpState.helperPort.postMessage({ type: 'CALL_RESULT', callId: callId, result: result });
+          }
+        });
+      } else {
+        fallbackFetch(toolMeta, fullUrl, method, sampleHeaders, bodyData).then(function (fbResult) {
+          fbResult.callId = callId;
+
+          addMcpCallLog({
+            timestamp: Date.now(),
+            toolName: toolName,
+            argsSummary: JSON.stringify(toolArguments).substring(0, 200),
+            status: fbResult.status || 0,
+            duration: Date.now() - startTime,
+            proxyMode: 'fallback',
+            error: fbResult.error || null
+          });
+
+          if (mcpState.helperPort && mcpState.helperConnected) {
+            mcpState.helperPort.postMessage({ type: 'CALL_RESULT', callId: callId, result: fbResult });
+          }
+        });
+      }
+    });
+  });
+}
+
+function syncToolsToHelper() {
+  if (!mcpState.helperPort || !mcpState.helperConnected) return;
+  chrome.storage.local.get(null, function (items) {
+    var allTools = {};
+    var storageKeys = Object.keys(items);
+    for (var ki = 0; ki < storageKeys.length; ki++) {
+      var key = storageKeys[ki];
+      if (key.indexOf('ai_req_mcp_tools_') !== 0) continue;
+      var toolsObj = items[key];
+      if (!toolsObj || typeof toolsObj !== 'object') continue;
+      var tKeys = Object.keys(toolsObj);
+      for (var ti = 0; ti < tKeys.length; ti++) {
+        allTools[tKeys[ti]] = toolsObj[tKeys[ti]];
+      }
+    }
+    try {
+      mcpState.helperPort.postMessage({ type: 'SYNC_TOOLS', tools: allTools });
+    } catch (e) {}
+  });
+}
+
+function addMcpCallLog(logEntry) {
+  mcpState.callLogs.push(logEntry);
+  if (mcpState.callLogs.length > 200) {
+    mcpState.callLogs.shift();
+  }
+}

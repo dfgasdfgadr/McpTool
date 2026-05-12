@@ -1,0 +1,9 @@
+{
+  "name": "com.aireq.mcp_helper",
+  "description": "AI Request Analyzer MCP Helper",
+  "path": "C:\\Users\\DH\\AppData\\Local\\nodejs\\node.exe",
+  "type": "stdio",
+  "allowed_origins": [
+    "chrome-extension://njgfblgbmbhkegiaopcpnikggdmieodc/"
+  ]
+}

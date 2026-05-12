@@ -3,7 +3,7 @@
   "name": "AI请求智能分析助手",
   "version": "1.0.0",
   "description": "基于AI智能分析请求用途与字段含义，支持修改响应数据",
-  "permissions": ["storage", "scripting", "contextMenus", "tabs"],
+  "permissions": ["storage", "scripting", "contextMenus", "tabs", "nativeMessaging"],
   "host_permissions": ["<all_urls>"],
   "background": {
     "service_worker": "background.js"
@@ -19,7 +19,16 @@
   "content_scripts": [
     {
       "matches": ["http://*/*", "https://*/*"],
-      "js": ["content/isolated.js"],
+      "js": [
+        "content/state.js",
+        "content/mock-rules.js",
+        "content/core.js",
+        "content/ai-analysis.js",
+        "content/mcp-engine.js",
+        "content/ui-core.js",
+        "content/mcp-ui.js",
+        "content/isolated.js"
+      ],
       "css": ["content/content.css"],
       "run_at": "document_start",
       "all_frames": false
