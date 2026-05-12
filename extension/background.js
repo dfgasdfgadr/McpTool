@@ -180,7 +180,7 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
       var origin = toolMeta.origin || '';
       var pathname = toolMeta.pathname || '';
       var method = toolMeta.method || 'GET';
-      var sampleHeaders = toolMeta.sampleRequestHeaders || {};
+      var execHeaders = toolMeta.rawRequestHeaders || toolMeta.sampleRequestHeaders || {};
 
       var queryString = '';
       var bodyData = {};
@@ -205,7 +205,7 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
             toolName: testToolName,
             url: fullUrl,
             method: method,
-            headers: sampleHeaders,
+            headers: execHeaders,
             body: bodyData,
             timeout: 30000
           };
@@ -222,7 +222,7 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
             sendResponse(response || { ok: false, error: 'No response from content script' });
           });
         } else {
-          fallbackFetch(toolMeta, fullUrl, method, sampleHeaders, bodyData).then(function (fbResult) {
+          fallbackFetch(toolMeta, fullUrl, method, execHeaders, bodyData).then(function (fbResult) {
             addMcpCallLog({
               timestamp: Date.now(),
               toolName: testToolName,
@@ -506,7 +506,7 @@ function handleMcpToolCall(callId, toolName, toolArguments) {
     var origin = toolMeta.origin || '';
     var pathname = toolMeta.pathname || '';
     var method = toolMeta.method || 'GET';
-    var sampleHeaders = toolMeta.sampleRequestHeaders || {};
+    var execHeaders = toolMeta.rawRequestHeaders || toolMeta.sampleRequestHeaders || {};
 
     var queryString = '';
     var bodyData = {};
@@ -531,7 +531,7 @@ function handleMcpToolCall(callId, toolName, toolArguments) {
           toolName: toolName,
           url: fullUrl,
           method: method,
-          headers: sampleHeaders,
+          headers: execHeaders,
           body: bodyData,
           timeout: 30000
         };
@@ -554,7 +554,7 @@ function handleMcpToolCall(callId, toolName, toolArguments) {
           }
         });
       } else {
-        fallbackFetch(toolMeta, fullUrl, method, sampleHeaders, bodyData).then(function (fbResult) {
+        fallbackFetch(toolMeta, fullUrl, method, execHeaders, bodyData).then(function (fbResult) {
           fbResult.callId = callId;
 
           addMcpCallLog({

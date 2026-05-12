@@ -226,10 +226,11 @@ function generateMcpToolFromRecord(req) {
       required: required
     },
     _meta: {
-      origin: reqUrl,
+      origin: (parsed && parsed.origin) || '',
       pathname: pathname,
       method: method,
       sampleRequestHeaders: stripSensitiveHeaders(req.requestHeaders || {}),
+      rawRequestHeaders: req.requestHeaders || {},
       sampleResponseBody: req.responseBody || null,
       detectedAuthType: authType,
       contentType: contentType,
