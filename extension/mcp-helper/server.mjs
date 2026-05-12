@@ -19,7 +19,6 @@ const pendingCalls = new Map();
 
 // ==================== Native Messaging（stdin/stdout） ====================
 
-// 读取 Native Messaging 消息（4字节小端序长度头 + JSON）
 function readNMMessage() {
   return new Promise((resolve, reject) => {
     const stdin = process.stdin;
@@ -56,7 +55,6 @@ function readNMMessage() {
   });
 }
 
-// 写入 Native Messaging 消息
 function writeNMMessage(msg) {
   const body = Buffer.from(JSON.stringify(msg), 'utf-8');
   const header = Buffer.alloc(4);
@@ -64,7 +62,6 @@ function writeNMMessage(msg) {
   process.stdout.write(Buffer.concat([header, body]));
 }
 
-// 持续监听 stdin 消息
 async function listenStdin() {
   while (true) {
     const msg = await readNMMessage();
@@ -83,7 +80,6 @@ function handleNMMessage(msg) {
       break;
     }
     case 'SYNC_TOOLS': {
-      // 同步工具定义，仅保留 enabled 的工具
       const toolsObj = msg.tools || {};
       cachedTools = Object.entries(toolsObj)
         .filter(([, v]) => v.enabled !== false)
@@ -110,9 +106,190 @@ function handleNMMessage(msg) {
   }
 }
 
-// ==================== 极简 WebSocket 实现（零依赖） ====================
+// ==================== MCP 协议处理核心 ====================
 
-// WebSocket 握手
+function processMCPMessage(msg, sendResponse, clientInfo) {
+  // 通知消息无需响应
+  if (msg.method === 'notifications/initialized') return;
+
+  // initialize
+  if (msg.method === 'initialize') {
+    if (AUTH_TOKEN) {
+      const clientToken = msg.params?.clientInfo?.token
+        || msg.params?._meta?.token
+        || msg.params?.token;
+      if (clientToken !== AUTH_TOKEN) {
+        sendResponse({
+          jsonrpc: '2.0',
+          id: msg.id,
+          error: { code: -32001, message: 'Unauthorized' },
+        });
+        return false;
+      }
+    }
+    sendResponse({
+      jsonrpc: '2.0',
+      id: msg.id,
+      result: {
+        protocolVersion: '2025-03-26',
+        capabilities: { tools: {} },
+        serverInfo: { name: 'ai-request-analyzer-mcp', version: '1.0.0' },
+      },
+    });
+    return true;
+  }
+
+  // tools/list
+  if (msg.method === 'tools/list') {
+    sendResponse({
+      jsonrpc: '2.0',
+      id: msg.id,
+      result: { tools: cachedTools },
+    });
+    return true;
+  }
+
+  // tools/call
+  if (msg.method === 'tools/call') {
+    const toolName = msg.params?.name;
+    const arguments_ = msg.params?.arguments || {};
+    const callId = crypto.randomUUID();
+
+    const timeout = setTimeout(() => {
+      if (pendingCalls.has(callId)) {
+        pendingCalls.delete(callId);
+        sendResponse({
+          jsonrpc: '2.0',
+          id: msg.id,
+          result: {
+            content: [{ type: 'text', text: `工具调用超时: ${toolName}` }],
+            isError: true,
+          },
+        });
+      }
+    }, 30000);
+
+    pendingCalls.set(callId, {
+      resolve(result) {
+        clearTimeout(timeout);
+        sendResponse({
+          jsonrpc: '2.0',
+          id: msg.id,
+          result: {
+            content: [{ type: 'text', text: JSON.stringify(result) }],
+            isError: false,
+          },
+        });
+      },
+    });
+
+    writeNMMessage({
+      type: 'CALL_REQUEST',
+      callId,
+      toolName,
+      arguments: arguments_,
+    });
+    return true;
+  }
+
+  // 未知方法
+  sendResponse({
+    jsonrpc: '2.0',
+    id: msg.id,
+    error: { code: -32601, message: `Method not found: ${msg.method}` },
+  });
+  return true;
+}
+
+// ==================== Streamable HTTP 传输 ====================
+
+const httpClients = new Map();
+
+function handleHTTPRequest(req, res) {
+  const url = req.url;
+
+  if (url !== '/mcp') {
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Not Found' }));
+    return;
+  }
+
+  // POST: JSON-RPC 请求
+  if (req.method === 'POST') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', () => {
+      let msg;
+      try {
+        msg = JSON.parse(body);
+      } catch {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ jsonrpc: '2.0', error: { code: -32700, message: 'Parse error' } }));
+        return;
+      }
+
+      // 如果是初始化请求，返回普通 JSON 响应
+      // 如果是通知或需要流式响应的，用 SSE
+      const isNotification = msg.id === undefined || msg.id === null;
+
+      if (isNotification || msg.method === 'notifications/initialized') {
+        processMCPMessage(msg, (resp) => {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(resp));
+        });
+        return;
+      }
+
+      // 普通请求：直接返回 JSON 响应
+      processMCPMessage(msg, (resp) => {
+        res.writeHead(200, {
+          'Content-Type': 'application/json',
+          'Cache-Control': 'no-cache',
+        });
+        res.end(JSON.stringify(resp));
+      });
+    });
+    return;
+  }
+
+  // GET: SSE 流（用于服务端向客户端推送）
+  if (req.method === 'GET') {
+    const clientId = crypto.randomUUID();
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+    });
+
+    // 发送一个初始事件表示连接建立
+    res.write(`event: endpoint\ndata: /mcp?clientId=${clientId}\n\n`);
+
+    httpClients.set(clientId, res);
+
+    req.on('close', () => {
+      httpClients.delete(clientId);
+    });
+
+    // 保持连接活跃
+    const keepAlive = setInterval(() => {
+      if (res.writableEnded) {
+        clearInterval(keepAlive);
+        return;
+      }
+      res.write(':keepalive\n\n');
+    }, 30000);
+
+    req.on('close', () => clearInterval(keepAlive));
+    return;
+  }
+
+  // 其他方法
+  res.writeHead(405, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ error: 'Method Not Allowed' }));
+}
+
+// ==================== WebSocket 传输（保持兼容） ====================
+
 const WS_MAGIC = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 
 function wsHandshake(key) {
@@ -127,7 +304,6 @@ function wsHandshake(key) {
   ].join('\r\n');
 }
 
-// 解码 WebSocket 帧
 function decodeFrame(buf) {
   if (buf.length < 2) return null;
   const first = buf[0];
@@ -164,7 +340,6 @@ function decodeFrame(buf) {
   return { fin, opcode, payload, frameLen: offset + payloadLen };
 }
 
-// 编码 WebSocket 文本帧（服务端发送不 mask）
 function encodeTextFrame(str) {
   const payload = Buffer.from(str, 'utf-8');
   const maskBit = 0;
@@ -172,7 +347,7 @@ function encodeTextFrame(str) {
 
   if (payload.length < 126) {
     header = Buffer.alloc(2);
-    header[0] = 0x81; // fin + text opcode
+    header[0] = 0x81;
     header[1] = maskBit | payload.length;
   } else if (payload.length < 65536) {
     header = Buffer.alloc(4);
@@ -189,27 +364,16 @@ function encodeTextFrame(str) {
   return Buffer.concat([header, payload]);
 }
 
-// 编码 WebSocket close 帧
 function encodeCloseFrame(code = 1000, reason = '') {
   const payload = Buffer.alloc(2 + Buffer.byteLength(reason, 'utf-8'));
   payload.writeUInt16BE(code, 0);
   payload.write(reason, 2, 'utf-8');
   const header = Buffer.alloc(2);
-  header[0] = 0x88; // fin + close opcode
+  header[0] = 0x88;
   header[1] = payload.length;
   return Buffer.concat([header, payload]);
 }
 
-// 编码 WebSocket ping 帧
-function encodePingFrame(data = '') {
-  const payload = Buffer.from(data, 'utf-8');
-  const header = Buffer.alloc(2);
-  header[0] = 0x89;
-  header[1] = payload.length;
-  return Buffer.concat([header, payload]);
-}
-
-// 编码 WebSocket pong 帧
 function encodePongFrame(data = '') {
   const payload = Buffer.from(data, 'utf-8');
   const header = Buffer.alloc(2);
@@ -218,15 +382,13 @@ function encodePongFrame(data = '') {
   return Buffer.concat([header, payload]);
 }
 
-// ==================== WebSocket 连接管理 ====================
-
-const clients = new Set();
+const wsClients = new Set();
 
 function handleWSConnection(socket) {
   let authed = !AUTH_TOKEN;
   let buffer = Buffer.alloc(0);
 
-  clients.add(socket);
+  wsClients.add(socket);
 
   socket.on('data', (chunk) => {
     buffer = Buffer.concat([buffer, chunk]);
@@ -237,151 +399,49 @@ function handleWSConnection(socket) {
       buffer = buffer.subarray(frame.frameLen);
 
       switch (frame.opcode) {
-        case 0x1: { // 文本帧
+        case 0x1: {
           const text = frame.payload.toString('utf-8');
-          handleMCPMessage(socket, text, authed);
+          let msg;
+          try {
+            msg = JSON.parse(text);
+          } catch {
+            return;
+          }
+          processMCPMessage(msg, (resp) => {
+            socket.write(encodeTextFrame(JSON.stringify(resp)));
+          }, { authed });
           if (!authed) authed = true;
           break;
         }
-        case 0x9: { // ping
+        case 0x9: {
           socket.write(encodePongFrame(frame.payload.toString('utf-8')));
           break;
         }
-        case 0x8: { // close
+        case 0x8: {
           socket.write(encodeCloseFrame());
           socket.end();
-          clients.delete(socket);
+          wsClients.delete(socket);
           break;
         }
-        case 0xa: // pong，忽略
+        case 0xa:
           break;
       }
     }
   });
 
   socket.on('close', () => {
-    clients.delete(socket);
+    wsClients.delete(socket);
   });
 
   socket.on('error', (err) => {
     log(`WebSocket 连接错误: ${err.message}`);
-    clients.delete(socket);
+    wsClients.delete(socket);
   });
 }
 
-// 发送 JSON-RPC 响应
-function wsSend(socket, obj) {
-  socket.write(encodeTextFrame(JSON.stringify(obj)));
-}
+// ==================== HTTP Server ====================
 
-// ==================== MCP 协议处理 ====================
-
-function handleMCPMessage(socket, text, alreadyAuthed) {
-  let msg;
-  try {
-    msg = JSON.parse(text);
-  } catch {
-    return;
-  }
-
-  // 通知消息无需响应
-  if (msg.method === 'notifications/initialized') return;
-
-  // initialize
-  if (msg.method === 'initialize') {
-    if (AUTH_TOKEN) {
-      const clientToken = msg.params?.clientInfo?.token
-        || msg.params?._meta?.token
-        || msg.params?.token;
-      if (clientToken !== AUTH_TOKEN) {
-        wsSend(socket, {
-          jsonrpc: '2.0',
-          id: msg.id,
-          error: { code: -32001, message: 'Unauthorized' },
-        });
-        socket.write(encodeCloseFrame(1008, 'Unauthorized'));
-        socket.end();
-        return;
-      }
-    }
-    wsSend(socket, {
-      jsonrpc: '2.0',
-      id: msg.id,
-      result: {
-        protocolVersion: '2025-03-26',
-        capabilities: { tools: {} },
-        serverInfo: { name: 'ai-request-analyzer-mcp', version: '1.0.0' },
-      },
-    });
-    return;
-  }
-
-  // tools/list
-  if (msg.method === 'tools/list') {
-    wsSend(socket, {
-      jsonrpc: '2.0',
-      id: msg.id,
-      result: { tools: cachedTools },
-    });
-    return;
-  }
-
-  // tools/call
-  if (msg.method === 'tools/call') {
-    const toolName = msg.params?.name;
-    const arguments_ = msg.params?.arguments || {};
-    const callId = crypto.randomUUID();
-
-    const timeout = setTimeout(() => {
-      if (pendingCalls.has(callId)) {
-        pendingCalls.delete(callId);
-        wsSend(socket, {
-          jsonrpc: '2.0',
-          id: msg.id,
-          result: {
-            content: [{ type: 'text', text: `工具调用超时: ${toolName}` }],
-            isError: true,
-          },
-        });
-      }
-    }, 30000);
-
-    pendingCalls.set(callId, {
-      resolve(result) {
-        clearTimeout(timeout);
-        wsSend(socket, {
-          jsonrpc: '2.0',
-          id: msg.id,
-          result: {
-            content: [{ type: 'text', text: JSON.stringify(result) }],
-            isError: false,
-          },
-        });
-      },
-    });
-
-    writeNMMessage({
-      type: 'CALL_REQUEST',
-      callId,
-      toolName,
-      arguments: arguments_,
-    });
-    return;
-  }
-
-  // 未知方法
-  wsSend(socket, {
-    jsonrpc: '2.0',
-    id: msg.id,
-    error: { code: -32601, message: `Method not found: ${msg.method}` },
-  });
-}
-
-// ==================== HTTP Server + WebSocket 升级 ====================
-
-const server = http.createServer((req, res) => {
-  res.writeHead(404).end();
-});
+const server = http.createServer(handleHTTPRequest);
 
 server.on('upgrade', (req, socket, head) => {
   if (req.url !== '/mcp') {
@@ -401,7 +461,8 @@ server.on('upgrade', (req, socket, head) => {
 });
 
 server.listen(port, 'localhost', () => {
-  log(`MCP Server 启动，WebSocket 监听 localhost:${port}/mcp`);
+  log(`MCP Server 启动，监听 localhost:${port}/mcp`);
+  log(`支持传输: Streamable HTTP (POST/GET) + WebSocket`);
   if (AUTH_TOKEN) log('鉴权 Token 已配置');
   else log('未配置鉴权 Token，允许所有连接');
 });

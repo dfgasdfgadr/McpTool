@@ -133,7 +133,7 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
 
   if (message.type === 'MCP_SYNC_TOOLS') {
     syncToolsToHelper();
-    sendResponse({ ok: true });
+    sendResponse({ ok: true, synced: mcpState.helperConnected });
     return true;
   }
 
@@ -577,7 +577,7 @@ function handleMcpToolCall(callId, toolName, toolArguments) {
 }
 
 function syncToolsToHelper() {
-  if (!mcpState.helperPort || !mcpState.helperConnected) return;
+  if (!mcpState.helperPort) return;
   chrome.storage.local.get(null, function (items) {
     var allTools = {};
     var storageKeys = Object.keys(items);
@@ -593,6 +593,7 @@ function syncToolsToHelper() {
     }
     try {
       mcpState.helperPort.postMessage({ type: 'SYNC_TOOLS', tools: allTools });
+      log(`已同步 ${Object.keys(allTools).length} 个工具到 Helper`);
     } catch (e) {}
   });
 }
