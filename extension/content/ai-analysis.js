@@ -69,6 +69,64 @@ function analyzeRequest(reqId) {
   });
 }
 
+function analyzeRequestsSequential(ids) {
+  if (!ids || !ids.length) {
+    showToast('\u672A\u9009\u4E2D\u8BF7\u6C42');
+    return Promise.resolve();
+  }
+  if (!state.config.apiKey) {
+    alert('请先配置API Key');
+    return Promise.reject(new Error('未配置API Key'));
+  }
+  var uniqueIds = [];
+  var seenId = {};
+  for (var u = 0; u < ids.length; u++) {
+    var id = ids[u];
+    if (!id || seenId[id]) continue;
+    seenId[id] = true;
+    uniqueIds.push(id);
+  }
+  var need = [];
+  for (var n = 0; n < uniqueIds.length; n++) {
+    var req = null;
+    for (var i = 0; i < state.requestRecords.length; i++) {
+      if (state.requestRecords[i].id === uniqueIds[n]) {
+        req = state.requestRecords[i];
+        break;
+      }
+    }
+    if (req && req.aiAnalysis == null) need.push(uniqueIds[n]);
+  }
+  if (need.length === 0) {
+    showToast('\u6240\u9009\u8BF7\u6C42\u5DF2\u5168\u90E8\u5206\u6790\u8FC7');
+    return Promise.resolve();
+  }
+  state.isAnalyzing = true;
+  state.analyzeProgress = { total: need.length, done: 0 };
+  updateAnalyzeProgress();
+  var chain = Promise.resolve();
+  need.forEach(function (reqId) {
+    chain = chain.then(function () {
+      return analyzeRequest(reqId).then(function () {
+        state.analyzeProgress.done++;
+        updateAnalyzeProgress();
+      }).catch(function () {
+        state.analyzeProgress.done++;
+        updateAnalyzeProgress();
+      });
+    });
+  });
+  return chain.then(function () {
+    state.isAnalyzing = false;
+    updateAnalyzeProgress();
+    showToast('\u6279\u91CF AI \u5206\u6790\u5B8C\u6210');
+    if (typeof refreshRequestList === 'function') refreshRequestList(undefined, false);
+  }).catch(function () {
+    state.isAnalyzing = false;
+    updateAnalyzeProgress();
+  });
+}
+
 function analyzeAllRequests() {
   if (state.isAnalyzing) return;
   var unanalyzed = state.requestRecords.filter(function (r) { return r.aiAnalysis === null; });

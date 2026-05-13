@@ -7,6 +7,44 @@ var MENU_IDS = {
   DIAG: 'ai_req_analyzer_diagnostics'
 };
 
+function escapeRegExpMcp(s) {
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function applyPathParamsToTemplate(pathnameTemplate, pathParamKeys, toolArguments) {
+  var path = pathnameTemplate || '';
+  var keys = pathParamKeys || [];
+  if (!keys.length || path.indexOf('{') === -1) return path;
+  var ki;
+  for (ki = 0; ki < keys.length; ki++) {
+    var k = keys[ki];
+    var val = toolArguments[k];
+    if (val === undefined || val === null) val = '';
+    path = path.replace(new RegExp('\\{' + escapeRegExpMcp(k) + '\\}', 'g'), encodeURIComponent(String(val)));
+  }
+  return path;
+}
+
+function partitionMcpToolArguments(toolMeta, toolArguments) {
+  var args = toolArguments || {};
+  var pathKeys = toolMeta.pathParamKeys || [];
+  var pathnameTemplate = toolMeta.pathname || '';
+  var resolvedPath = pathnameTemplate;
+  if (pathKeys.length && pathnameTemplate.indexOf('{') !== -1) {
+    resolvedPath = applyPathParamsToTemplate(pathnameTemplate, pathKeys, args);
+  }
+  var rest = {};
+  var ak = Object.keys(args);
+  var ai;
+  for (ai = 0; ai < ak.length; ai++) {
+    var key = ak[ai];
+    if (key.charAt(0) === '_') continue;
+    if (pathKeys.indexOf(key) >= 0) continue;
+    rest[key] = args[key];
+  }
+  return { pathname: resolvedPath, restArgs: rest };
+}
+
 function installMenus() {
   chrome.contextMenus.removeAll(function () {
     chrome.contextMenus.create({
@@ -60,40 +98,35 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
   if (!message || !message.type) return;
 
   if (message.type === 'INJECT_PAGE_HOOK') {
-    var tabId = sender.tab && sender.tab.id;
-    if (typeof tabId === 'undefined') {
-      sendResponse({ ok: false, error: 'no sender.tab（内容脚本发往后台即可获得 tab）' });
-      return false;
+    var injTabId = sender.tab && sender.tab.id;
+    if (typeof injTabId === 'undefined') {
+      return Promise.resolve({ ok: false, error: 'no sender.tab（内容脚本发往后台即可获得 tab）' });
     }
-    chrome.scripting.executeScript(
-      {
-        target: { tabId: tabId, allFrames: false },
+    return chrome.scripting
+      .executeScript({
+        target: { tabId: injTabId, allFrames: false },
         world: 'MAIN',
         files: ['content/page-hook.js']
-      },
-      function () {
-        if (chrome.runtime.lastError) {
-          sendResponse({
-            ok: false,
-            error: chrome.runtime.lastError.message || 'executeScript failed'
-          });
-        } else {
-          sendResponse({ ok: true });
-        }
-      }
-    );
-    return true;
+      })
+      .then(function () {
+        return { ok: true };
+      })
+      .catch(function (err) {
+        return {
+          ok: false,
+          error: err && err.message ? err.message : 'executeScript failed'
+        };
+      });
   }
 
   if (message.type === 'READ_PAGE_HOOK_INSTALLED') {
-    var tid = sender.tab && sender.tab.id;
-    if (typeof tid === 'undefined') {
-      sendResponse({ hooked: false, error: 'no tab id' });
-      return false;
+    var hookTid = sender.tab && sender.tab.id;
+    if (typeof hookTid === 'undefined') {
+      return Promise.resolve({ hooked: false, error: 'no tab id' });
     }
-    chrome.scripting.executeScript(
-      {
-        target: { tabId: tid, allFrames: false },
+    return chrome.scripting
+      .executeScript({
+        target: { tabId: hookTid, allFrames: false },
         world: 'MAIN',
         func: function () {
           try {
@@ -102,18 +135,15 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
             return false;
           }
         }
-      },
-      function (results) {
-        if (chrome.runtime.lastError) {
-          sendResponse({ hooked: false, error: chrome.runtime.lastError.message });
-          return;
-        }
-        sendResponse({
+      })
+      .then(function (results) {
+        return {
           hooked: !!(results && results[0] && results[0].result)
-        });
-      }
-    );
-    return true;
+        };
+      })
+      .catch(function (err) {
+        return { hooked: false, error: err && err.message ? err.message : String(err) };
+      });
   }
 
   if (message.type === 'MCP_START_HELPER') {
@@ -178,21 +208,23 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
       }
 
       var origin = toolMeta.origin || '';
-      var pathname = toolMeta.pathname || '';
       var method = toolMeta.method || 'GET';
       var execHeaders = toolMeta.rawRequestHeaders || toolMeta.sampleRequestHeaders || {};
 
+      var partedTest = partitionMcpToolArguments(toolMeta, testArgs);
+      var pathname = partedTest.pathname;
+
       var queryString = '';
       var bodyData = {};
-      var argKeys = Object.keys(testArgs);
+      var argKeys = Object.keys(partedTest.restArgs);
       for (var ai = 0; ai < argKeys.length; ai++) {
         var argKey = argKeys[ai];
         if (argKey.charAt(0) === '_') continue;
         var isInQuery = toolMeta.queryParams && toolMeta.queryParams.indexOf(argKey) >= 0;
         if (isInQuery || method.toUpperCase() === 'GET') {
-          queryString += (queryString ? '&' : '?') + encodeURIComponent(argKey) + '=' + encodeURIComponent(String(testArgs[argKey]));
+          queryString += (queryString ? '&' : '?') + encodeURIComponent(argKey) + '=' + encodeURIComponent(String(partedTest.restArgs[argKey]));
         } else {
-          bodyData[argKey] = testArgs[argKey];
+          bodyData[argKey] = partedTest.restArgs[argKey];
         }
       }
 
@@ -504,21 +536,23 @@ function handleMcpToolCall(callId, toolName, toolArguments) {
     }
 
     var origin = toolMeta.origin || '';
-    var pathname = toolMeta.pathname || '';
     var method = toolMeta.method || 'GET';
     var execHeaders = toolMeta.rawRequestHeaders || toolMeta.sampleRequestHeaders || {};
 
+    var partedCall = partitionMcpToolArguments(toolMeta, toolArguments);
+    var pathname = partedCall.pathname;
+
     var queryString = '';
     var bodyData = {};
-    var argKeys = Object.keys(toolArguments || {});
+    var argKeys = Object.keys(partedCall.restArgs);
     for (var ai = 0; ai < argKeys.length; ai++) {
       var argKey = argKeys[ai];
       if (argKey.charAt(0) === '_') continue;
       var isInQuery = toolMeta.queryParams && toolMeta.queryParams.indexOf(argKey) >= 0;
       if (isInQuery || method.toUpperCase() === 'GET') {
-        queryString += (queryString ? '&' : '?') + encodeURIComponent(argKey) + '=' + encodeURIComponent(String(toolArguments[argKey]));
+        queryString += (queryString ? '&' : '?') + encodeURIComponent(argKey) + '=' + encodeURIComponent(String(partedCall.restArgs[argKey]));
       } else {
-        bodyData[argKey] = toolArguments[argKey];
+        bodyData[argKey] = partedCall.restArgs[argKey];
       }
     }
 
@@ -593,7 +627,7 @@ function syncToolsToHelper() {
     }
     try {
       mcpState.helperPort.postMessage({ type: 'SYNC_TOOLS', tools: allTools });
-      log(`已同步 ${Object.keys(allTools).length} 个工具到 Helper`);
+      console.log('[AI_REQ_ANALYZER] synced tools to helper:', Object.keys(allTools).length);
     } catch (e) {}
   });
 }

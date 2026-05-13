@@ -3,6 +3,18 @@ import crypto from 'node:crypto';
 import { Buffer } from 'node:buffer';
 
 const AUTH_TOKEN = process.env.MCP_AUTH_TOKEN || null;
+
+/** MCP HTTP/WS 路径只认 pathname，忽略 query（Cursor Streamable HTTP 会对 /mcp?... 带会话参数） */
+function isMcpRequestPath(reqUrl) {
+  if (!reqUrl || typeof reqUrl !== 'string') return false;
+  try {
+    return new URL(reqUrl, 'http://127.0.0.1').pathname === '/mcp';
+  } catch {
+    const base = reqUrl.split('?')[0] || '';
+    return base === '/mcp';
+  }
+}
+
 const args = process.argv.slice(2);
 let port = 9527;
 for (let i = 0; i < args.length; i++) {
@@ -109,8 +121,11 @@ function handleNMMessage(msg) {
 // ==================== MCP 协议处理核心 ====================
 
 function processMCPMessage(msg, sendResponse, clientInfo) {
-  // 通知消息无需响应
-  if (msg.method === 'notifications/initialized') return;
+  // MCP 通知：JSON-RPC 可无 id，但 Streamable HTTP 仍必须结束响应，否则客户端会一直等待（无法进入 tools/list）
+  if (msg.method === 'notifications/initialized') {
+    sendResponse({ __mcpNotificationAck: true });
+    return;
+  }
 
   // initialize
   if (msg.method === 'initialize') {
@@ -208,7 +223,7 @@ const httpClients = new Map();
 function handleHTTPRequest(req, res) {
   const url = req.url;
 
-  if (url !== '/mcp') {
+  if (!isMcpRequestPath(url)) {
     res.writeHead(404, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'Not Found' }));
     return;
@@ -230,10 +245,16 @@ function handleHTTPRequest(req, res) {
 
       // 如果是初始化请求，返回普通 JSON 响应
       // 如果是通知或需要流式响应的，用 SSE
+
       const isNotification = msg.id === undefined || msg.id === null;
 
       if (isNotification || msg.method === 'notifications/initialized') {
         processMCPMessage(msg, (resp) => {
+          if (resp && resp.__mcpNotificationAck) {
+            res.writeHead(202);
+            res.end();
+            return;
+          }
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify(resp));
         });
@@ -242,6 +263,11 @@ function handleHTTPRequest(req, res) {
 
       // 普通请求：直接返回 JSON 响应
       processMCPMessage(msg, (resp) => {
+        if (resp && resp.__mcpNotificationAck) {
+          res.writeHead(202);
+          res.end();
+          return;
+        }
         res.writeHead(200, {
           'Content-Type': 'application/json',
           'Cache-Control': 'no-cache',
@@ -408,6 +434,7 @@ function handleWSConnection(socket) {
             return;
           }
           processMCPMessage(msg, (resp) => {
+            if (resp && resp.__mcpNotificationAck) return;
             socket.write(encodeTextFrame(JSON.stringify(resp)));
           }, { authed });
           if (!authed) authed = true;
@@ -444,7 +471,7 @@ function handleWSConnection(socket) {
 const server = http.createServer(handleHTTPRequest);
 
 server.on('upgrade', (req, socket, head) => {
-  if (req.url !== '/mcp') {
+  if (!isMcpRequestPath(req.url)) {
     socket.write('HTTP/1.1 404 Not Found\r\n\r\n');
     socket.destroy();
     return;

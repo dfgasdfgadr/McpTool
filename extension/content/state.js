@@ -8,13 +8,23 @@ function storageGet(key, defVal) {
 function storageSet(key, val) {
   if (val === null || typeof val === 'undefined') {
     delete STORAGE_CACHE[key];
-    chrome.storage.local.remove(key);
+    try {
+      chrome.storage.local.remove(key);
+    } catch (e) {}
     return;
   }
   STORAGE_CACHE[key] = val;
   var o = {};
   o[key] = val;
-  chrome.storage.local.set(o);
+  try {
+    chrome.storage.local.set(o, function () {
+      if (chrome.runtime.lastError) {
+        console.warn('[AI_REQ_ANALYZER] storageSet error:', chrome.runtime.lastError.message);
+      }
+    });
+  } catch (e) {
+    console.warn('[AI_REQ_ANALYZER] storageSet exception:', e.message);
+  }
 }
 
 function storageHydrateThen(cb) {
@@ -35,7 +45,8 @@ var DEFAULT_CONFIG = {
   temperature: 1,
   mcpPort: 9527,
   mcpToken: '',
-  mcpAutoSync: false
+  mcpAutoSync: false,
+  mcpToolNaming: 'full'
 };
 
 var CONFIG_KEY = 'ai_req_analyzer_config';
@@ -65,7 +76,24 @@ var state = {
   uiReady: false,
   menuReady: false,
   mcpTools: {},
-  mcpPanelTab: 'list'
+  mcpPanelTab: 'list',
+  listFilters: {
+    dupOnly: false,
+    mock: 'all',
+    analyzed: 'all',
+    methods: {},
+    groupMode: 'none'
+  },
+  selectedReqIds: {},
+  selectedMcpToolNames: {},
+  mcpUseEnhancedGeneration: false,
+  mcpListUi: {
+    keyword: '',
+    groupMode: 'none',
+    filterEnabled: 'all',
+    riskLevels: {},
+    toolbarCollapsed: false
+  }
 };
 
 function loadConfig() {

@@ -1,3 +1,70 @@
+function ensureMcpListUi() {
+  if (!state.mcpListUi) {
+    state.mcpListUi = {
+      keyword: '',
+      groupMode: 'none',
+      filterEnabled: 'all',
+      riskLevels: {},
+      toolbarCollapsed: false
+    };
+  }
+}
+
+function passesMcpListFilters(tool, ui) {
+  if (ui.filterEnabled === 'on' && tool.enabled === false) return false;
+  if (ui.filterEnabled === 'off' && tool.enabled !== false) return false;
+  var rl = ((tool._meta || {}).riskLevel || 'low').toLowerCase();
+  var rf = ui.riskLevels || {};
+  var anyRisk = false;
+  var rk;
+  for (rk in rf) {
+    if (rf.hasOwnProperty(rk) && rf[rk]) {
+      anyRisk = true;
+      break;
+    }
+  }
+  if (anyRisk && !rf[rl]) return false;
+  return true;
+}
+
+function mcpToolMatchesKeyword(tool, name, kwLower) {
+  if (!kwLower) return true;
+  var meta = tool._meta || {};
+  var hay = (name + '\n' + (tool.description || '') + '\n' + (meta.method || '') + ' ' + (meta.pathname || '')).toLowerCase();
+  return hay.indexOf(kwLower) !== -1;
+}
+
+function getMcpToolGroupKey(name, tool, groupMode) {
+  var meta = tool._meta || {};
+  if (groupMode === 'method') return (meta.method || 'GET').toUpperCase();
+  if (groupMode === 'risk') return String((meta.riskLevel || 'low')).toLowerCase();
+  if (groupMode === 'pathPrefix') {
+    var p = meta.pathname || '';
+    var seg = p.replace(/^\/+/, '').split('/')[0];
+    return seg ? seg : '(root)';
+  }
+  return '';
+}
+
+function getFilteredSortedMcpToolNames() {
+  ensureMcpListUi();
+  var ui = state.mcpListUi;
+  var kwLower = (ui.keyword || '').trim().toLowerCase();
+  var all = Object.keys(state.mcpTools || {});
+  var pass = [];
+  var ii;
+  for (ii = 0; ii < all.length; ii++) {
+    var nm = all[ii];
+    var tl = state.mcpTools[nm];
+    if (!tl) continue;
+    if (!passesMcpListFilters(tl, ui)) continue;
+    if (!mcpToolMatchesKeyword(tl, nm, kwLower)) continue;
+    pass.push(nm);
+  }
+  pass.sort();
+  return pass;
+}
+
 function refreshMainPanelContent() {
   var bodyEl = state.mainPanel.querySelector('.ai-req-main-body');
   if (!bodyEl) return;
@@ -25,36 +92,97 @@ function refreshMainPanelContent() {
 }
 
 function buildMcpToolListHTML() {
+  ensureMcpListUi();
+  var ui = state.mcpListUi;
+  var collapsed = !!ui.toolbarCollapsed;
   var html = '';
+  html += '<div class="ai-req-mcp-toolbar-wrap' + (collapsed ? ' ai-req-mcp-toolbar-collapsed' : '') + '">';
+  html += '<div class="ai-req-mcp-collapse-bar">';
+  html += '<button type="button" class="ai-req-btn ai-req-btn-secondary ai-req-mcp-toolbar-collapse-btn">';
+  html += collapsed ? '\u5C55\u5F00\u5DE5\u5177\u680F' : '\u6536\u8D77\u5DE5\u5177\u680F';
+  html += '</button>';
+  html += '<span class="ai-req-mcp-toolbar-mini"></span>';
+  html += '</div>';
+  html += '<div class="ai-req-mcp-toolbar-expandable">';
   html += '<div class="ai-req-mcp-status-bar">';
   html += '<span class="ai-req-mcp-status-dot ai-req-mcp-status-dot-off"></span>';
   html += '<span class="ai-req-mcp-status-text">MCP \u25CB \u672A\u542F\u52A8</span>';
   html += '<button class="ai-req-mcp-start-btn">\u542F\u52A8</button>';
   html += '</div>';
+  html += '<div class="ai-req-mcp-filter-row">';
+  html += '<input type="search" class="ai-req-mcp-list-search" placeholder="\u641C\u7D22\u5DE5\u5177/\u63CF\u8FF0/path..." value="' + escapeHtml(ui.keyword || '') + '">';
+  html += '<select class="ai-req-mcp-group-select">';
+  var gm = ui.groupMode || 'none';
+  html += '<option value="none"' + (gm === 'none' ? ' selected' : '') + '>\u5E73\u94FA</option>';
+  html += '<option value="method"' + (gm === 'method' ? ' selected' : '') + '>\u6309\u65B9\u6CD5</option>';
+  html += '<option value="risk"' + (gm === 'risk' ? ' selected' : '') + '>\u6309\u98CE\u9669</option>';
+  html += '<option value="pathPrefix"' + (gm === 'pathPrefix' ? ' selected' : '') + '>\u6309\u8DEF\u5F84\u9996\u6BB5</option>';
+  html += '</select>';
+  var fe = ui.filterEnabled || 'all';
+  html += '<button type="button" class="ai-req-mcp-fe-chip' + (fe === 'all' ? ' ai-req-chip-on' : '') + '" data-mcp-fe="all">\u5168\u90E8</button>';
+  html += '<button type="button" class="ai-req-mcp-fe-chip' + (fe === 'on' ? ' ai-req-chip-on' : '') + '" data-mcp-fe="on">\u5DF2\u542F\u7528</button>';
+  html += '<button type="button" class="ai-req-mcp-fe-chip' + (fe === 'off' ? ' ai-req-chip-on' : '') + '" data-mcp-fe="off">\u5DF2\u5173\u95ED</button>';
+  var risks = ui.riskLevels || {};
+  html += '<button type="button" class="ai-req-mcp-risk-chip' + (risks.low ? ' ai-req-chip-on' : '') + '" data-mcp-risk="low">low</button>';
+  html += '<button type="button" class="ai-req-mcp-risk-chip' + (risks.medium ? ' ai-req-chip-on' : '') + '" data-mcp-risk="medium">med</button>';
+  html += '<button type="button" class="ai-req-mcp-risk-chip' + (risks.high ? ' ai-req-chip-on' : '') + '" data-mcp-risk="high">high</button>';
+  html += '</div>';
+  html += '<div class="ai-req-mcp-bulk-actions">';
+  html += '<input type="file" accept="application/json,.json" class="ai-req-mcp-import-file-input" tabindex="-1" aria-hidden="true">';
+  html += '<button type="button" class="ai-req-btn ai-req-btn-secondary ai-req-mcp-exp-all">\u5168\u90E8\u5BFC\u51FA</button>';
+  html += '<button type="button" class="ai-req-btn ai-req-btn-secondary ai-req-mcp-exp-sel">\u5DF2\u9009\u5BFC\u51FA</button>';
+  html += '<button type="button" class="ai-req-btn ai-req-btn-secondary ai-req-mcp-imp-btn">\u5BFC\u5165...</button>';
+  html += '<button type="button" class="ai-req-btn ai-req-btn-secondary ai-req-mcp-sel-all">\u5168\u9009</button>';
+  html += '<button type="button" class="ai-req-btn ai-req-btn-secondary ai-req-mcp-sel-clear">\u6E05\u9009</button>';
+  html += '<button type="button" class="ai-req-btn ai-req-btn-primary ai-req-mcp-merge-selected">\u5408\u5E76\u5DF2\u9009</button>';
+  html += '<button type="button" class="ai-req-btn ai-req-btn-danger ai-req-mcp-del-selected">\u5220\u9664\u5DF2\u9009</button>';
+  html += '</div>';
+  html += '</div>';
+  html += '</div>';
   html += '<div class="ai-req-mcp-tool-list">';
-  var toolNames = Object.keys(state.mcpTools || {});
-  if (toolNames.length === 0) {
+  var toolNames = getFilteredSortedMcpToolNames();
+  var allN = Object.keys(state.mcpTools || {}).length;
+  var gm2 = ui.groupMode || 'none';
+  var lastGk = '\u0000';
+  if (allN === 0) {
     html += '<div class="ai-req-mcp-empty">\u6682\u65E0 MCP \u5DE5\u5177\uFF0C\u8BF7\u4ECE\u8BF7\u6C42\u5217\u8868\u751F\u6210</div>';
+  } else if (toolNames.length === 0) {
+    html += '<div class="ai-req-mcp-empty">\u65E0\u5339\u914D\u9879\uFF0C\u8C03\u6574\u7B5B\u9009\u6216\u5173\u952E\u8BCD</div>';
   }
-  for (var i = 0; i < toolNames.length; i++) {
-    var name = toolNames[i];
+  var ti;
+  for (ti = 0; ti < toolNames.length; ti++) {
+    var name = toolNames[ti];
     var tool = state.mcpTools[name];
     var riskLevel = (tool._meta && tool._meta.riskLevel) || 'low';
     var enabled = tool.enabled !== false;
     var desc = tool.description || '';
+    var picked = state.selectedMcpToolNames[name] ? true : false;
+    var meta = tool._meta || {};
+    var routeLine = ((meta.method || 'GET').toUpperCase() + ' ' + (meta.pathname || '')).trim();
+    if (gm2 !== 'none') {
+      var gk = getMcpToolGroupKey(name, tool, gm2);
+      if (gk !== lastGk) {
+        lastGk = gk;
+        html += '<div class="ai-req-mcp-group-header"><span class="ai-req-mcp-group-title">' + escapeHtml(gk) + '</span></div>';
+      }
+    }
     html += '<div class="ai-req-mcp-tool-item" data-tool-name="' + escapeHtml(name) + '">';
+    html += '<div class="ai-req-mcp-tool-main">';
+    html += '<label class="ai-req-mcp-tool-pick-wrap"><input type="checkbox" class="ai-req-mcp-tool-pick" data-tool-name="' + escapeHtml(name) + '"' + (picked ? ' checked' : '') + '></label>';
+    html += '<div class="ai-req-mcp-tool-right">';
     html += '<div class="ai-req-mcp-tool-header">';
-    html += '<span class="ai-req-mcp-tool-name">' + escapeHtml(name) + '</span>';
+    html += '<span class="ai-req-mcp-tool-name" title="' + escapeHtml(name) + '">' + escapeHtml(name) + '</span>';
     html += '<span class="ai-req-mcp-risk ai-req-mcp-risk-' + escapeHtml(riskLevel) + '">' + escapeHtml(riskLevel) + '</span>';
     html += '<label class="ai-req-mcp-toggle"><input type="checkbox" class="ai-req-mcp-tool-enabled" data-tool-name="' + escapeHtml(name) + '"' + (enabled ? ' checked' : '') + '></label>';
     html += '</div>';
+    html += '<div class="ai-req-mcp-tool-route">' + escapeHtml(routeLine) + '</div>';
     html += '<div class="ai-req-mcp-tool-desc">' + escapeHtml(desc) + '</div>';
     html += '<div class="ai-req-mcp-tool-actions">';
-    html += '<button class="ai-req-mcp-tool-edit-btn" data-tool-name="' + escapeHtml(name) + '">\u7F16\u8F91</button>';
-    html += '<button class="ai-req-mcp-tool-test-btn" data-tool-name="' + escapeHtml(name) + '">\u6D4B\u8BD5</button>';
-    html += '<button class="ai-req-mcp-tool-delete-btn" data-tool-name="' + escapeHtml(name) + '">\u5220\u9664</button>';
+    html += '<button type="button" class="ai-req-mcp-tool-edit-btn" data-tool-name="' + escapeHtml(name) + '">\u7F16\u8F91</button>';
+    html += '<button type="button" class="ai-req-mcp-tool-test-btn" data-tool-name="' + escapeHtml(name) + '">\u6D4B\u8BD5</button>';
+    html += '<button type="button" class="ai-req-mcp-tool-delete-btn" data-tool-name="' + escapeHtml(name) + '">\u5220\u9664</button>';
     html += '</div>';
-    html += '</div>';
+    html += '</div></div></div>';
   }
   html += '</div>';
   html += '<div class="ai-req-mcp-tab-bar">';
@@ -83,6 +211,63 @@ function buildMcpLogListHTML() {
 
 function bindMcpContentEvents(mcpContent) {
   refreshMcpStatusBar(mcpContent);
+
+  ensureMcpListUi();
+  var miniBar = mcpContent.querySelector('.ai-req-mcp-toolbar-mini');
+  if (miniBar && state.mcpPanelTab === 'list') {
+    var fv = getFilteredSortedMcpToolNames().length;
+    var ta = Object.keys(state.mcpTools || {}).length;
+    miniBar.textContent = '\u663E\u793A ' + fv + ' / \u5171 ' + ta;
+  }
+
+  var collapseTb = mcpContent.querySelector('.ai-req-mcp-toolbar-collapse-btn');
+  if (collapseTb) {
+    collapseTb.addEventListener('click', function () {
+      ensureMcpListUi();
+      state.mcpListUi.toolbarCollapsed = !state.mcpListUi.toolbarCollapsed;
+      refreshMainPanelContent();
+    });
+  }
+
+  var mcpSearch = mcpContent.querySelector('.ai-req-mcp-list-search');
+  if (mcpSearch) {
+    mcpSearch.addEventListener('input', function () {
+      ensureMcpListUi();
+      state.mcpListUi.keyword = mcpSearch.value;
+      refreshMainPanelContent();
+    });
+  }
+
+  var grpSel = mcpContent.querySelector('.ai-req-mcp-group-select');
+  if (grpSel) {
+    grpSel.addEventListener('change', function () {
+      ensureMcpListUi();
+      state.mcpListUi.groupMode = grpSel.value || 'none';
+      refreshMainPanelContent();
+    });
+  }
+
+  var feChips = mcpContent.querySelectorAll('.ai-req-mcp-fe-chip');
+  var fc;
+  for (fc = 0; fc < feChips.length; fc++) {
+    feChips[fc].addEventListener('click', function () {
+      ensureMcpListUi();
+      var v = this.getAttribute('data-mcp-fe');
+      state.mcpListUi.filterEnabled = v || 'all';
+      refreshMainPanelContent();
+    });
+  }
+
+  var rkChips = mcpContent.querySelectorAll('.ai-req-mcp-risk-chip');
+  for (fc = 0; fc < rkChips.length; fc++) {
+    rkChips[fc].addEventListener('click', function () {
+      ensureMcpListUi();
+      var rk = this.getAttribute('data-mcp-risk');
+      if (!state.mcpListUi.riskLevels) state.mcpListUi.riskLevels = {};
+      state.mcpListUi.riskLevels[rk] = !state.mcpListUi.riskLevels[rk];
+      refreshMainPanelContent();
+    });
+  }
 
   var startBtn = mcpContent.querySelector('.ai-req-mcp-start-btn');
   if (startBtn) {
@@ -123,6 +308,7 @@ function bindMcpContentEvents(mcpContent) {
         state.mcpTools[tName].enabled = this.checked;
         saveMcpTools();
         chrome.runtime.sendMessage({ type: 'MCP_SYNC_TOOLS' });
+        if (state.mcpPanelTab === 'list') refreshMainPanelContent();
       }
     });
   }
@@ -151,6 +337,153 @@ function bindMcpContentEvents(mcpContent) {
         refreshMainPanelContent();
         showToast('\u5DF2\u5220\u9664: ' + dName);
       }
+    });
+  }
+
+  var pickBoxes = mcpContent.querySelectorAll('.ai-req-mcp-tool-pick');
+  for (var pi = 0; pi < pickBoxes.length; pi++) {
+    pickBoxes[pi].addEventListener('change', function (evPk) {
+      evPk.stopPropagation();
+      var pnm = this.getAttribute('data-tool-name');
+      if (!state.selectedMcpToolNames) state.selectedMcpToolNames = {};
+      if (this.checked) state.selectedMcpToolNames[pnm] = true;
+      else delete state.selectedMcpToolNames[pnm];
+    });
+  }
+
+  var expAllBtn = mcpContent.querySelector('.ai-req-mcp-exp-all');
+  if (expAllBtn) {
+    expAllBtn.addEventListener('click', function () {
+      var sanHead = confirm('\u5BFC\u51FA\u65F6\u5220\u9664 Authorization/Cookie \u7B49\u654F\u611F\u5934\uFF1F');
+      var pkgFull = buildMcpToolsExportPayload(state.mcpTools || {}, !!sanHead);
+      downloadMcpPkgWithFilename(pkgFull, 'mcp-tools_' + location.hostname + '_' + mcpFmtDateTag());
+      showToast('\u5BFC\u51FA\u5DF2\u4E0B\u8F7D');
+    });
+  }
+
+  var expSelBtn = mcpContent.querySelector('.ai-req-mcp-exp-sel');
+  if (expSelBtn) {
+    expSelBtn.addEventListener('click', function () {
+      var snames = getSelectedMcpToolNamesOrdered();
+      if (!snames.length) {
+        showToast('\u5148\u52FE\u9009\u8981\u5BFC\u51FA\u7684\u5DE5\u5177');
+        return;
+      }
+      var subset = {};
+      var si;
+      for (si = 0; si < snames.length; si++) subset[snames[si]] = state.mcpTools[snames[si]];
+      var sanSel = confirm('\u8131\u654F\u5934\u90E8\u518D\u5BFC\u51FA\uFF1F');
+      var pkgSel = buildMcpToolsExportPayload(subset, !!sanSel);
+      downloadMcpPkgWithFilename(pkgSel, 'mcp-tools_sel_' + location.hostname + '_' + mcpFmtDateTag());
+      showToast('\u5DF2\u9009 ' + snames.length + '\u4E2A\u5DE5\u5177');
+    });
+  }
+
+  var impBtn = mcpContent.querySelector('.ai-req-mcp-imp-btn');
+  var impInput = mcpContent.querySelector('.ai-req-mcp-import-file-input');
+  if (impBtn && impInput) {
+    impBtn.addEventListener('click', function () {
+      impInput.click();
+    });
+    impInput.addEventListener('change', function () {
+      var f = impInput.files && impInput.files[0];
+      if (!f) return;
+      var reader = new FileReader();
+      reader.onload = function (evRf) {
+        try {
+          var parsedImp = JSON.parse(String(evRf.target.result || '{}'));
+          var mergeFirst = confirm('\u786E\u5B9A=\u5408\u5E76\u5BFC\u5165 | \u53D6\u6D88=\u5168\u91CF\u66FF\u6362');
+          var outcome;
+          if (mergeFirst) {
+            var cmode = (prompt('\u540C\u540D: skip | overwrite | rename', 'skip') || 'skip').toLowerCase();
+            if (['skip', 'overwrite', 'rename'].indexOf(cmode) === -1) cmode = 'skip';
+            outcome = applyMcpToolsImport(parsedImp, 'merge', cmode);
+          } else {
+            if (!confirm('\u786E\u5B9A\u7528\u6587\u4EF6\u5B8C\u5168\u66FF\u6362\u672C\u7AD9\u70B9 MCP \u5DE5\u5177\u914D\u7F6E\uFF1F')) {
+              outcome = { ok: false, error: 'cancelled' };
+            } else {
+              outcome = applyMcpToolsImport(parsedImp, 'replace');
+            }
+          }
+          if (outcome && outcome.ok) {
+            saveMcpTools();
+            chrome.runtime.sendMessage({ type: 'MCP_SYNC_TOOLS' });
+            refreshMainPanelContent();
+            showToast('\u5BFC\u5165\u6210\u529F ' + (outcome.imported || '') + '');
+          } else if (outcome && outcome.error !== 'cancelled') {
+            showToast('\u5BFC\u5165\u5931\u8D25: ' + outcome.error);
+          }
+        } catch (eImp) {
+          showToast('\u89E3\u6790\u5931\u8D25: ' + eImp.message);
+        }
+        impInput.value = '';
+      };
+      reader.readAsText(f, 'UTF-8');
+    });
+  }
+
+  var selAllMc = mcpContent.querySelector('.ai-req-mcp-sel-all');
+  if (selAllMc) {
+    selAllMc.addEventListener('click', function () {
+      if (!state.selectedMcpToolNames) state.selectedMcpToolNames = {};
+      var vis = getFilteredSortedMcpToolNames();
+      var vx;
+      for (vx = 0; vx < vis.length; vx++) state.selectedMcpToolNames[vis[vx]] = true;
+      refreshMainPanelContent();
+    });
+  }
+
+  var selClrMc = mcpContent.querySelector('.ai-req-mcp-sel-clear');
+  if (selClrMc) {
+    selClrMc.addEventListener('click', function () {
+      state.selectedMcpToolNames = {};
+      refreshMainPanelContent();
+    });
+  }
+
+  var mergeBtn = mcpContent.querySelector('.ai-req-mcp-merge-selected');
+  if (mergeBtn) {
+    mergeBtn.addEventListener('click', function () {
+      var mnames = getSelectedMcpToolNamesOrdered();
+      if (mnames.length < 2) {
+        showToast('\u5408\u5E76\u81F3\u5C11\u9009\u4E24\u9879');
+        return;
+      }
+      var mobjs = [];
+      var mi;
+      for (mi = 0; mi < mnames.length; mi++) {
+        if (state.mcpTools[mnames[mi]]) mobjs.push(state.mcpTools[mnames[mi]]);
+      }
+      try {
+        var mergedToolDef = mergeMcpToolDefinitions(mobjs);
+        for (mi = 0; mi < mnames.length; mi++) delete state.mcpTools[mnames[mi]];
+        state.selectedMcpToolNames = {};
+        state.mcpTools[mergedToolDef.name] = mergedToolDef;
+        saveMcpTools();
+        chrome.runtime.sendMessage({ type: 'MCP_SYNC_TOOLS' });
+        refreshMainPanelContent();
+        showToast('\u5DF2\u5408\u5E76\u4E3A ' + mergedToolDef.name);
+      } catch (errM) {
+        showToast('\u5408\u5E76\u5931\u8D25: ' + errM.message);
+      }
+    });
+  }
+
+  var delSelBtn = mcpContent.querySelector('.ai-req-mcp-del-selected');
+  if (delSelBtn) {
+    delSelBtn.addEventListener('click', function () {
+      var dnm = getSelectedMcpToolNamesOrdered();
+      if (!dnm.length) {
+        showToast('\u5148\u52FE\u9009\u8981\u5220\u9664\u7684\u9879\u76EE');
+        return;
+      }
+      if (!confirm('\u786E\u5B9A\u5220\u9664\u5DF2\u9009 ' + dnm.length + ' \u9879\uFF1F')) return;
+      var dj;
+      for (dj = 0; dj < dnm.length; dj++) deleteMcpTool(dnm[dj]);
+      state.selectedMcpToolNames = {};
+      chrome.runtime.sendMessage({ type: 'MCP_SYNC_TOOLS' });
+      refreshMainPanelContent();
+      showToast('\u5DF2\u6279\u91CF\u5220\u9664');
     });
   }
 
@@ -249,6 +582,33 @@ function pad2(n) {
   return n < 10 ? '0' + n : String(n);
 }
 
+function mcpFmtDateTag() {
+  var d = new Date();
+  return d.getFullYear() + pad2(d.getMonth() + 1) + pad2(d.getDate());
+}
+
+function downloadMcpPkgWithFilename(pkg, filenameBase) {
+  var blob = new Blob([JSON.stringify(pkg, null, 2)], { type: 'application/json' });
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement('a');
+  a.href = url;
+  a.download = /\.json$/i.test(filenameBase) ? filenameBase : filenameBase + '.json';
+  a.click();
+  setTimeout(function () {
+    URL.revokeObjectURL(url);
+  }, 2500);
+}
+
+function getSelectedMcpToolNamesOrdered() {
+  var outArr = [];
+  var sm = state.selectedMcpToolNames || {};
+  var nm;
+  for (nm in state.mcpTools || {}) {
+    if (!(state.mcpTools || {}).hasOwnProperty(nm)) continue;
+    if (sm[nm]) outArr.push(nm);
+  }
+  return outArr;
+}
 function openMcpToolEditor(toolName) {
   var tool = state.mcpTools[toolName];
   if (!tool) return;
