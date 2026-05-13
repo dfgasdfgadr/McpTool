@@ -190,14 +190,17 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
     chrome.storage.local.get(null, function (items) {
       var toolDef = null;
       var toolMeta = null;
+      var matchedStorageHost = '';
       var storageKeys = Object.keys(items);
       for (var ki = 0; ki < storageKeys.length; ki++) {
         var key = storageKeys[ki];
         if (key.indexOf('ai_req_mcp_tools_') !== 0) continue;
+        var hostname = key.substring('ai_req_mcp_tools_'.length);
         var toolsObj = parseStoredTools(items[key]);
         if (toolsObj && toolsObj[testToolName]) {
           toolDef = toolsObj[testToolName];
           toolMeta = toolDef._meta || {};
+          matchedStorageHost = hostname;
           break;
         }
       }
@@ -208,6 +211,9 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
       }
 
       var origin = toolMeta.origin || '';
+      if (!/^https?:\/\//i.test(origin) && matchedStorageHost) {
+        origin = 'https://' + matchedStorageHost;
+      }
       var method = toolMeta.method || 'GET';
       var execHeaders = toolMeta.rawRequestHeaders || toolMeta.sampleRequestHeaders || {};
 
@@ -447,7 +453,14 @@ function handleHelperMessage(msg) {
 
 function findTargetTab(origin) {
   return new Promise(function (resolve) {
-    chrome.tabs.query({ url: origin + '/*' }, function (tabs) {
+    var base = String(origin || '').replace(/\/+$/, '');
+    var pattern = base + '/*';
+    var validOrigin = !!(base && /^https?:\/\//i.test(base));
+    if (!validOrigin) {
+      resolve(null);
+      return;
+    }
+    chrome.tabs.query({ url: pattern }, function (tabs) {
       if (!tabs || tabs.length === 0) {
         resolve(null);
         return;
@@ -505,6 +518,7 @@ function handleMcpToolCall(callId, toolName, toolArguments) {
   chrome.storage.local.get(null, function (items) {
     var toolDef = null;
     var toolMeta = null;
+    var matchedStorageHost = '';
     var storageKeys = Object.keys(items);
     for (var ki = 0; ki < storageKeys.length; ki++) {
       var key = storageKeys[ki];
@@ -514,6 +528,7 @@ function handleMcpToolCall(callId, toolName, toolArguments) {
       if (toolsObj && toolsObj[toolName]) {
         toolDef = toolsObj[toolName];
         toolMeta = toolDef._meta || {};
+        matchedStorageHost = hostname;
         break;
       }
     }
@@ -536,6 +551,9 @@ function handleMcpToolCall(callId, toolName, toolArguments) {
     }
 
     var origin = toolMeta.origin || '';
+    if (!/^https?:\/\//i.test(origin) && matchedStorageHost) {
+      origin = 'https://' + matchedStorageHost;
+    }
     var method = toolMeta.method || 'GET';
     var execHeaders = toolMeta.rawRequestHeaders || toolMeta.sampleRequestHeaders || {};
 

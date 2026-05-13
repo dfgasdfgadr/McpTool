@@ -1,11 +1,30 @@
 var STORAGE_CACHE = {};
 
+function isExtensionContextValid() {
+  try {
+    return !!(typeof chrome !== 'undefined' && chrome.runtime && typeof chrome.runtime.id === 'string' && chrome.runtime.id.length > 0);
+  } catch (e) {
+    return false;
+  }
+}
+
+var extensionContextInvalidLogged = false;
+function warnExtensionContextInvalidOnce() {
+  if (extensionContextInvalidLogged) return;
+  extensionContextInvalidLogged = true;
+  console.warn('[AI_REQ_ANALYZER] 扩展已重载或更新，当前页面脚本已失效。请刷新本页后再使用（Extension context invalidated）。');
+}
+
 function storageGet(key, defVal) {
   if (Object.prototype.hasOwnProperty.call(STORAGE_CACHE, key)) return STORAGE_CACHE[key];
   return defVal;
 }
 
 function storageSet(key, val) {
+  if (!isExtensionContextValid()) {
+    warnExtensionContextInvalidOnce();
+    return;
+  }
   if (val === null || typeof val === 'undefined') {
     delete STORAGE_CACHE[key];
     try {
@@ -28,6 +47,13 @@ function storageSet(key, val) {
 }
 
 function storageHydrateThen(cb) {
+  if (!isExtensionContextValid()) {
+    warnExtensionContextInvalidOnce();
+    try {
+      if (typeof cb === 'function') cb();
+    } catch (eCb) {}
+    return;
+  }
   chrome.storage.local.get(null, function (items) {
     if (chrome.runtime.lastError) {
       cb();

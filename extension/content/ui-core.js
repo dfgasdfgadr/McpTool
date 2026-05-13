@@ -180,6 +180,7 @@ function createMainPanel() {
     '<div class="ai-req-chip-row">' +
     '  <span class="ai-req-filter-label">\u7B5B\u9009:</span>' +
     '  <button type="button" class="ai-req-chip" data-filter-chip="dup">\u91CD\u590D\u8BF7\u6C42</button>' +
+    '  <button type="button" class="ai-req-chip ai-req-dedupe-reqs-btn">\u5220\u9664\u91CD\u590D\u8BF7\u6C42</button>' +
     '  <span class="ai-req-chip-sep">|</span>' +
     '  <span class="ai-req-chip-sub">Mock:</span>' +
     '  <button type="button" class="ai-req-chip" data-mock-filter-chip="all">\u5168\u90E8</button>' +
@@ -223,14 +224,12 @@ function createMainPanel() {
   mcpGenAllBtn.title = '\u6839\u636E\u5168\u90E8\u6293\u5305\u8BB0\u5F55\uFF08\u4E0E\u4EE5\u524D\u4E00\u81F4\uFF09\uFF1B\u975E\u201C\u589E\u5F3A\u201D\u914D\u7F6E';
   mcpGenAllBtn.addEventListener('click', function () {
     var toolsNative = generateMcpToolsFromRecords(state.requestRecords);
-    var tiNat;
-    for (tiNat = 0; tiNat < toolsNative.length; tiNat++) {
-      var tnm = toolsNative[tiNat];
-      state.mcpTools[tnm.name] = tnm;
+    var stats = mergeGeneratedMcpToolsIntoState(toolsNative);
+    if (stats.added > 0) {
+      saveMcpTools();
+      chrome.runtime.sendMessage({ type: 'MCP_SYNC_TOOLS' });
     }
-    saveMcpTools();
-    chrome.runtime.sendMessage({ type: 'MCP_SYNC_TOOLS' });
-    showToast('\u5DF2\u751F\u6210 ' + toolsNative.length + ' \u4E2A MCP \u5DE5\u5177');
+    showToast('\u65B0\u589E ' + stats.added + '\uFF0C\u8DF3\u8FC7\u91CD\u590D ' + stats.skipped);
   });
   var mcpGenViewBtn = document.createElement('button');
   mcpGenViewBtn.type = 'button';
@@ -241,11 +240,12 @@ function createMainPanel() {
     var viewRecs = filterRequestRecords(state.requestRecords, getActiveListKeyword());
     var genVX = typeof pickGeneratorForRequests === 'function' ? pickGeneratorForRequests() : generateMcpToolsFromRecords;
     var toolsV = genVX(viewRecs);
-    var iv;
-    for (iv = 0; iv < toolsV.length; iv++) state.mcpTools[toolsV[iv].name] = toolsV[iv];
-    saveMcpTools();
-    chrome.runtime.sendMessage({ type: 'MCP_SYNC_TOOLS' });
-    showToast('\u89C6\u56FE MCP ' + toolsV.length + '\u4E2A');
+    var statsV = mergeGeneratedMcpToolsIntoState(toolsV);
+    if (statsV.added > 0) {
+      saveMcpTools();
+      chrome.runtime.sendMessage({ type: 'MCP_SYNC_TOOLS' });
+    }
+    showToast('\u89C6\u56FE MCP \u65B0\u589E ' + statsV.added + '\uFF0C\u8DF3\u8FC7 ' + statsV.skipped);
   });
 
   var mcpGenSelBtn = document.createElement('button');
@@ -265,11 +265,12 @@ function createMainPanel() {
     }
     var genSX = typeof pickGeneratorForRequests === 'function' ? pickGeneratorForRequests() : generateMcpToolsFromRecords;
     var toolsS = genSX(srec);
-    var is;
-    for (is = 0; is < toolsS.length; is++) state.mcpTools[toolsS[is].name] = toolsS[is];
-    saveMcpTools();
-    chrome.runtime.sendMessage({ type: 'MCP_SYNC_TOOLS' });
-    showToast('\u5DF2\u9009 MCP ' + toolsS.length + '\u4E2A');
+    var statsS = mergeGeneratedMcpToolsIntoState(toolsS);
+    if (statsS.added > 0) {
+      saveMcpTools();
+      chrome.runtime.sendMessage({ type: 'MCP_SYNC_TOOLS' });
+    }
+    showToast('\u5DF2\u9009 MCP \u65B0\u589E ' + statsS.added + '\uFF0C\u8DF3\u8FC7 ' + statsS.skipped);
   });
 
   var clearMockBtn = document.createElement('button');
@@ -494,6 +495,34 @@ function duplicateSignatureCounts(records) {
   return mp;
 }
 
+function removeDuplicateRequestRecordsBySignature() {
+  var records = state.requestRecords || [];
+  if (records.length < 2) return 0;
+  var seen = Object.create(null);
+  var kept = [];
+  var removedIds = Object.create(null);
+  var i;
+  for (i = 0; i < records.length; i++) {
+    var rec = records[i];
+    var sig = computeRequestSignature(rec);
+    if (seen[sig]) {
+      removedIds[rec.id] = true;
+      continue;
+    }
+    seen[sig] = true;
+    kept.push(rec);
+  }
+  var removed = records.length - kept.length;
+  if (!removed) return 0;
+  state.requestRecords = kept;
+  for (var id in state.selectedReqIds) {
+    if (removedIds[id]) delete state.selectedReqIds[id];
+  }
+  if (state.selectedReqId && removedIds[state.selectedReqId]) state.selectedReqId = null;
+  if (state.selectedRewriteReqId && removedIds[state.selectedRewriteReqId]) state.selectedRewriteReqId = null;
+  return removed;
+}
+
 function passesMethodChip(rec, methodsObj) {
   var chosen = false;
   for (var mk in methodsObj) {
@@ -644,6 +673,14 @@ function wireReqFilterInteractionsOnce(panel) {
 
   panel.addEventListener('click', function (ev) {
     var tg = ev.target;
+    var dedupeReqBtn = tg.closest && tg.closest('.ai-req-dedupe-reqs-btn');
+    if (dedupeReqBtn) {
+      if (!confirm('\u6309 METHOD+\u8DEF\u5F84+\u67E5\u8BE2+\u8BF7\u6C42\u4F53\u6307\u7EB9\u5220\u9664\u91CD\u590D\uFF0C\u6BCF\u6761\u7B7E\u540D\u4EC5\u4FDD\u7559\u9996\u6761\u8BB0\u5F55\u3002\u786E\u5B9A\uFF1F')) return;
+      var nRm = removeDuplicateRequestRecordsBySignature();
+      refreshRequestList(getActiveListKeyword(), false);
+      showToast(nRm ? '\u5DF2\u5220\u9664\u91CD\u590D ' + nRm + ' \u6761' : '\u65E0\u91CD\u590D\u8BF7\u6C42');
+      return;
+    }
     var chipDupEl = tg.closest && tg.closest('[data-filter-chip="dup"]');
     if (chipDupEl) {
       state.listFilters.dupOnly = !state.listFilters.dupOnly;
@@ -708,12 +745,12 @@ function wireReqFilterInteractionsOnce(panel) {
       } else if (act === 'bulk-mcp-selected') {
         var genFnSel = typeof pickGeneratorForRequests === 'function' ? pickGeneratorForRequests() : generateMcpToolsFromRecords;
         var tlsSel = genFnSel(selectedRecsInner());
-        for (var z = 0; z < tlsSel.length; z++) {
-          state.mcpTools[tlsSel[z].name] = tlsSel[z];
+        var bulkSt = mergeGeneratedMcpToolsIntoState(tlsSel);
+        if (bulkSt.added > 0) {
+          saveMcpTools();
+          chrome.runtime.sendMessage({ type: 'MCP_SYNC_TOOLS' });
         }
-        saveMcpTools();
-        chrome.runtime.sendMessage({ type: 'MCP_SYNC_TOOLS' });
-        showToast('\u751F\u6210 ' + tlsSel.length + ' \u4E2A MCP \u5DE5\u5177');
+        showToast('\u751F\u6210 \u65B0\u589E ' + bulkSt.added + '\uFF0C\u8DF3\u8FC7 ' + bulkSt.skipped);
       }
       refreshRequestList(undefined, false);
     });
@@ -1080,7 +1117,13 @@ function bindDetailEvents(detailEl, req, keyword) {
       }
       if (!mReq) return;
       var mTool = generateMcpToolFromRecord(mReq);
-      state.mcpTools[mTool.name] = mTool;
+      var map = state.mcpTools || (state.mcpTools = {});
+      if (shouldSkipApplyingGeneratedMcpTool(mTool, map)) {
+        var exNm = findExistingMcpToolNameByConflictKey(mTool, map);
+        showToast(exNm ? '\u5DF2\u6709\u76F8\u540C\u7AEF\u70B9\u5DE5\u5177: ' + exNm : '\u540C\u540D\u6216\u91CD\u590D\uFF0C\u672A\u5199\u5165');
+        return;
+      }
+      map[mTool.name] = mTool;
       saveMcpTools();
       chrome.runtime.sendMessage({ type: 'MCP_SYNC_TOOLS' });
       showToast('MCP \u5DE5\u5177\u5DF2\u751F\u6210: ' + mTool.name);

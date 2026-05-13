@@ -569,6 +569,82 @@ function inferPathParams(pathname, sampleRecords) {
   return paramList;
 }
 
+function mcpToolsMetaConflictKey(tool) {
+  if (!tool || typeof tool !== 'object') return '';
+  var m = tool._meta || {};
+  var ppk = String(m.pathPatternKey || '').trim();
+  if (ppk) return 'ppk:' + ppk;
+  return 'lit:' + String(m.method || 'GET').toUpperCase() + '\t' + String(m.pathname || '');
+}
+
+function findExistingMcpToolNameByConflictKey(newTool, mcpMap) {
+  var target = mcpToolsMetaConflictKey(newTool);
+  var nm;
+  for (nm in mcpMap) {
+    if (!Object.prototype.hasOwnProperty.call(mcpMap, nm)) continue;
+    var ex = mcpMap[nm];
+    if (!ex || typeof ex !== 'object') continue;
+    if (mcpToolsMetaConflictKey(ex) === target) return nm;
+  }
+  return null;
+}
+
+function shouldSkipApplyingGeneratedMcpTool(t, mcpMap) {
+  if (!t || !t.name) return true;
+  if (findExistingMcpToolNameByConflictKey(t, mcpMap)) return true;
+  if (Object.prototype.hasOwnProperty.call(mcpMap, t.name)) return true;
+  return false;
+}
+
+function mergeGeneratedMcpToolsIntoState(toolsArray) {
+  var mcpMap = state.mcpTools || (state.mcpTools = {});
+  var added = 0;
+  var skipped = 0;
+  var i;
+  if (!toolsArray || !toolsArray.length) return { added: 0, skipped: 0 };
+  for (i = 0; i < toolsArray.length; i++) {
+    var t = toolsArray[i];
+    if (shouldSkipApplyingGeneratedMcpTool(t, mcpMap)) {
+      skipped++;
+      continue;
+    }
+    mcpMap[t.name] = t;
+    added++;
+  }
+  return { added: added, skipped: skipped };
+}
+
+function removeDuplicateMcpToolsByConflictKey() {
+  var mtools = state.mcpTools;
+  if (!mtools || typeof mtools !== 'object') return 0;
+  var groups = Object.create(null);
+  var nm;
+  for (nm in mtools) {
+    if (!Object.prototype.hasOwnProperty.call(mtools, nm)) continue;
+    var tk = mcpToolsMetaConflictKey(mtools[nm]);
+    if (!groups[tk]) groups[tk] = [];
+    groups[tk].push(nm);
+  }
+  var removed = 0;
+  var gk;
+  for (gk in groups) {
+    if (!Object.prototype.hasOwnProperty.call(groups, gk)) continue;
+    var names = groups[gk].slice().sort();
+    if (names.length < 2) continue;
+    var zi;
+    for (zi = 1; zi < names.length; zi++) {
+      var kill = names[zi];
+      delete mtools[kill];
+      if (state.selectedMcpToolNames && state.selectedMcpToolNames[kill]) {
+        delete state.selectedMcpToolNames[kill];
+      }
+      removed++;
+    }
+  }
+  if (removed) saveMcpTools();
+  return removed;
+}
+
 function generateMcpToolFromRecord(req) {
   var reqUrl = req.originalUrl || req.url || '';
   var method = (req.method || 'GET').toUpperCase();
