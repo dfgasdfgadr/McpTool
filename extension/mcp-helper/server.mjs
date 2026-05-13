@@ -1,8 +1,11 @@
 import http from 'node:http';
 import crypto from 'node:crypto';
 import { Buffer } from 'node:buffer';
+import fs from 'node:fs/promises';
+import path from 'node:path';
 
 const AUTH_TOKEN = process.env.MCP_AUTH_TOKEN || null;
+const MAX_EXPORT_FILE_BYTES = 5 * 1024 * 1024;
 
 /** MCP HTTP/WS 路径只认 pathname，忽略 query（Cursor Streamable HTTP 会对 /mcp?... 带会话参数） */
 function isMcpRequestPath(reqUrl) {
@@ -85,6 +88,20 @@ async function listenStdin() {
   }
 }
 
+/** fileName must be plain basename (no separators / ..). */
+function safeResolveUnderExportDir(dirPath, fileName) {
+  if (!dirPath || typeof dirPath !== 'string' || !fileName || typeof fileName !== 'string') return null;
+  const trimmed = fileName.trim();
+  if (!trimmed || trimmed.includes('..') || /[/\\\\]/.test(trimmed)) return null;
+  const bn = path.basename(trimmed);
+  if (bn !== trimmed) return null;
+  const base = path.resolve(dirPath.trim());
+  const full = path.resolve(base, bn);
+  const rel = path.relative(base, full);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) return null;
+  return full;
+}
+
 function handleNMMessage(msg) {
   switch (msg.type) {
     case 'PING': {
@@ -114,6 +131,111 @@ function handleNMMessage(msg) {
     case 'SHUTDOWN': {
       log('收到 SHUTDOWN 命令，退出');
       process.exit(0);
+    }
+    case 'LIST_EXPORT_DIR': {
+      const { requestId, dirPath } = msg;
+      (async () => {
+        try {
+          if (!dirPath || typeof dirPath !== 'string' || !dirPath.trim()) {
+            writeNMMessage({ type: 'LIST_EXPORT_DIR_RESULT', requestId, ok: false, error: '目录路径为空' });
+            return;
+          }
+          const resolved = path.resolve(dirPath.trim());
+          await fs.stat(resolved);
+          const entries = await fs.readdir(resolved, { withFileTypes: true });
+          const files = [];
+          for (const ent of entries) {
+            if (!ent.isFile()) continue;
+            if (!ent.name.toLowerCase().endsWith('.json')) continue;
+            const fp = path.join(resolved, ent.name);
+            const st = await fs.stat(fp);
+            files.push({ name: ent.name, mtimeMs: st.mtimeMs });
+          }
+          files.sort((a, b) => a.name.localeCompare(b.name));
+          writeNMMessage({ type: 'LIST_EXPORT_DIR_RESULT', requestId, ok: true, files });
+        } catch (e) {
+          writeNMMessage({
+            type: 'LIST_EXPORT_DIR_RESULT',
+            requestId,
+            ok: false,
+            error: e && e.message ? e.message : String(e),
+          });
+        }
+      })();
+      break;
+    }
+    case 'READ_EXPORT_FILE': {
+      const { requestId, dirPath, fileName } = msg;
+      (async () => {
+        try {
+          if (!dirPath || typeof dirPath !== 'string' || !dirPath.trim()) {
+            writeNMMessage({ type: 'READ_EXPORT_FILE_RESULT', requestId, ok: false, error: '目录路径为空' });
+            return;
+          }
+          const full = safeResolveUnderExportDir(dirPath, fileName || '');
+          if (!full) {
+            writeNMMessage({ type: 'READ_EXPORT_FILE_RESULT', requestId, ok: false, error: '非法文件名或路径' });
+            return;
+          }
+          const st = await fs.stat(full);
+          if (st.size > MAX_EXPORT_FILE_BYTES) {
+            writeNMMessage({ type: 'READ_EXPORT_FILE_RESULT', requestId, ok: false, error: `文件超过 ${MAX_EXPORT_FILE_BYTES} 字节` });
+            return;
+          }
+          const text = await fs.readFile(full, 'utf8');
+          writeNMMessage({ type: 'READ_EXPORT_FILE_RESULT', requestId, ok: true, text });
+        } catch (e) {
+          writeNMMessage({
+            type: 'READ_EXPORT_FILE_RESULT',
+            requestId,
+            ok: false,
+            error: e && e.message ? e.message : String(e),
+          });
+        }
+      })();
+      break;
+    }
+    case 'WRITE_EXPORT_FILE': {
+      const { requestId, dirPath, fileName, text } = msg;
+      (async () => {
+        try {
+          if (!dirPath || typeof dirPath !== 'string' || !dirPath.trim()) {
+            writeNMMessage({ type: 'WRITE_EXPORT_FILE_RESULT', requestId, ok: false, error: '目录路径为空' });
+            return;
+          }
+          if (typeof text !== 'string') {
+            writeNMMessage({ type: 'WRITE_EXPORT_FILE_RESULT', requestId, ok: false, error: '内容无效' });
+            return;
+          }
+          const byteLen = Buffer.byteLength(text, 'utf8');
+          if (byteLen > MAX_EXPORT_FILE_BYTES) {
+            writeNMMessage({
+              type: 'WRITE_EXPORT_FILE_RESULT',
+              requestId,
+              ok: false,
+              error: `内容超过 ${MAX_EXPORT_FILE_BYTES} 字节`,
+            });
+            return;
+          }
+          const base = path.resolve(dirPath.trim());
+          await fs.mkdir(base, { recursive: true });
+          const full = safeResolveUnderExportDir(dirPath, fileName || '');
+          if (!full) {
+            writeNMMessage({ type: 'WRITE_EXPORT_FILE_RESULT', requestId, ok: false, error: '非法文件名或路径' });
+            return;
+          }
+          await fs.writeFile(full, text, 'utf8');
+          writeNMMessage({ type: 'WRITE_EXPORT_FILE_RESULT', requestId, ok: true, savedPath: full });
+        } catch (e) {
+          writeNMMessage({
+            type: 'WRITE_EXPORT_FILE_RESULT',
+            requestId,
+            ok: false,
+            error: e && e.message ? e.message : String(e),
+          });
+        }
+      })();
+      break;
     }
   }
 }

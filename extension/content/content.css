@@ -1500,6 +1500,80 @@
   color: #555;
   cursor: pointer;
 }
+.ai-req-config-hint {
+  font-size: 11px;
+  color: #888;
+  margin-top: 6px;
+  line-height: 1.4;
+}
+
+.ai-req-mcp-local-exports-panel {
+  padding: 10px 12px 12px;
+  flex: 1;
+  overflow: auto;
+  min-height: 120px;
+}
+.ai-req-mcp-local-path-row {
+  font-size: 12px;
+  margin-bottom: 8px;
+  word-break: break-all;
+}
+.ai-req-mcp-local-path-label {
+  font-weight: 600;
+  color: #444;
+}
+.ai-req-mcp-local-path-value {
+  color: #222;
+}
+.ai-req-mcp-local-hint {
+  font-size: 11px;
+  color: #777;
+  margin: 0 0 10px;
+  line-height: 1.45;
+}
+.ai-req-mcp-local-refresh {
+  margin-bottom: 12px;
+}
+.ai-req-mcp-local-export-list {
+  border: 1px solid #e8e8f0;
+  border-radius: 8px;
+  background: #fafafa;
+  overflow: hidden;
+}
+.ai-req-mcp-local-export-placeholder,
+.ai-req-mcp-local-export-loading {
+  padding: 16px;
+  text-align: center;
+  color: #999;
+  font-size: 13px;
+}
+.ai-req-mcp-local-file-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid #eee;
+  font-size: 12px;
+}
+.ai-req-mcp-local-file-row:last-child {
+  border-bottom: none;
+}
+.ai-req-mcp-local-file-name {
+  flex: 1;
+  min-width: 120px;
+  font-weight: 500;
+  word-break: break-all;
+}
+.ai-req-mcp-local-file-mtime {
+  color: #888;
+  white-space: nowrap;
+}
+.ai-req-mcp-local-file-row .ai-req-btn {
+  padding: 4px 8px;
+  font-size: 11px;
+}
+
 .ai-req-mcp-loading {
   text-align: center;
   padding: 24px;

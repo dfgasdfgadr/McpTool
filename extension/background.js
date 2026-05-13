@@ -182,6 +182,44 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
     return true;
   }
 
+  if (message.type === 'MCP_LIST_EXPORT_DIR') {
+    var dpList = (message.dirPath || (message.payload && message.payload.dirPath) || '').trim();
+    nmRpcExportInvoke('LIST_EXPORT_DIR', { dirPath: dpList }, sendResponse);
+    return true;
+  }
+
+  if (message.type === 'MCP_READ_EXPORT_FILE') {
+    var dpRead = (message.dirPath || (message.payload && message.payload.dirPath) || '').trim();
+    var fnRead = message.fileName || (message.payload && message.payload.fileName) || '';
+    nmRpcExportInvoke('READ_EXPORT_FILE', { dirPath: dpRead, fileName: fnRead }, sendResponse);
+    return true;
+  }
+
+  if (message.type === 'MCP_WRITE_EXPORT_FILE') {
+    var dpWrite = (message.dirPath || '').trim();
+    var fnWrite = message.fileName || '';
+    var txtWrite = typeof message.text === 'string' ? message.text : '';
+    var encLen =
+      typeof TextEncoder !== 'undefined'
+        ? new TextEncoder().encode(txtWrite).length
+        : txtWrite.length;
+    if (encLen > 1040000) {
+      sendResponse({
+        ok: false,
+        error: '\u5BFC\u51FA\u5185\u5BB9\u8FC7\u5927\uFF08Native Messaging \u9650\u5236\uFF09\uFF0C\u8BF7\u6539\u7528\u6D4F\u89C8\u5668\u4E0B\u8F7D',
+        tooLarge: true
+      });
+      return true;
+    }
+    nmRpcExportInvoke(
+      'WRITE_EXPORT_FILE',
+      { dirPath: dpWrite, fileName: fnWrite, text: txtWrite },
+      sendResponse,
+      60000
+    );
+    return true;
+  }
+
   if (message.type === 'MCP_TOOL_TEST') {
     var testToolName = message.toolName;
     var testArgs = message.arguments || {};
@@ -349,6 +387,54 @@ var mcpState = {
   serverPort: 9527
 };
 
+/** LIST_EXPORT_DIR / READ_EXPORT_FILE / WRITE_EXPORT_FILE Native Messaging RPC pending by requestId */
+var nmExportRpcPending = {};
+
+function flushNmExportRpcPending(reason) {
+  var rid;
+  for (rid in nmExportRpcPending) {
+    if (!nmExportRpcPending.hasOwnProperty(rid)) continue;
+    var p = nmExportRpcPending[rid];
+    clearTimeout(p.timer);
+    if (!p.done) {
+      p.done = true;
+      try {
+        p.sendResponse({ ok: false, error: reason || 'Native Messaging \u5DF2\u65AD\u5F00' });
+      } catch (eSr) {}
+    }
+    delete nmExportRpcPending[rid];
+  }
+}
+
+function nmRpcExportInvoke(nmType, bodyObj, sendResponse, timeoutMs) {
+  var tm = typeof timeoutMs === 'number' && timeoutMs > 0 ? timeoutMs : 15000;
+  if (!mcpState.helperPort || !mcpState.helperConnected) {
+    sendResponse({ ok: false, error: 'MCP \u52A9\u624B\u672A\u8FDE\u63A5\uFF0C\u8BF7\u5148\u542F\u52A8' });
+    return;
+  }
+  var requestId = 'ex_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+  var timer = setTimeout(function () {
+    var p = nmExportRpcPending[requestId];
+    if (!p || p.done) return;
+    p.done = true;
+    delete nmExportRpcPending[requestId];
+    sendResponse({ ok: false, error: 'Native Messaging \u8D85\u65F6' });
+  }, tm);
+  nmExportRpcPending[requestId] = { timer: timer, sendResponse: sendResponse, done: false };
+  try {
+    var payload = { type: nmType, requestId: requestId };
+    var k;
+    for (k in bodyObj) {
+      if (Object.prototype.hasOwnProperty.call(bodyObj, k)) payload[k] = bodyObj[k];
+    }
+    mcpState.helperPort.postMessage(payload);
+  } catch (ex) {
+    clearTimeout(timer);
+    delete nmExportRpcPending[requestId];
+    sendResponse({ ok: false, error: ex && ex.message ? ex.message : String(ex) });
+  }
+}
+
 function parseStoredTools(toolsVal) {
   if (!toolsVal) return null;
   if (typeof toolsVal === 'string') {
@@ -397,6 +483,28 @@ function connectMcpHelper() {
   }, 2000);
 
   mcpState.helperPort.onMessage.addListener(function (msg) {
+    if (
+      msg &&
+      msg.requestId &&
+      (msg.type === 'LIST_EXPORT_DIR_RESULT' ||
+        msg.type === 'READ_EXPORT_FILE_RESULT' ||
+        msg.type === 'WRITE_EXPORT_FILE_RESULT')
+    ) {
+      var pend = nmExportRpcPending[msg.requestId];
+      if (pend && !pend.done) {
+        clearTimeout(pend.timer);
+        pend.done = true;
+        delete nmExportRpcPending[msg.requestId];
+        if (msg.type === 'LIST_EXPORT_DIR_RESULT') {
+          pend.sendResponse({ ok: !!msg.ok, files: msg.files, error: msg.error });
+        } else if (msg.type === 'READ_EXPORT_FILE_RESULT') {
+          pend.sendResponse({ ok: !!msg.ok, text: msg.text, error: msg.error });
+        } else {
+          pend.sendResponse({ ok: !!msg.ok, savedPath: msg.savedPath, error: msg.error });
+        }
+      }
+      return;
+    }
     if (msg && msg.type === 'PONG') {
       mcpState.helperConnected = true;
       mcpState.helperError = null;
@@ -409,6 +517,7 @@ function connectMcpHelper() {
 
   mcpState.helperPort.onDisconnect.addListener(function () {
     var lastError = chrome.runtime.lastError ? chrome.runtime.lastError.message : '';
+    flushNmExportRpcPending(lastError || 'Native Messaging \u5DF2\u65AD\u5F00');
     mcpState.helperConnected = false;
     mcpState.helperPort = null;
     if (mcpState.helperStopping) {
@@ -432,6 +541,7 @@ function connectMcpHelper() {
 }
 
 function disconnectMcpHelper() {
+  flushNmExportRpcPending('Native Messaging \u5DF2\u65AD\u5F00');
   if (mcpState.helperPort) {
     mcpState.helperStopping = true;
     try {

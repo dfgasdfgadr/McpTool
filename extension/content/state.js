@@ -72,7 +72,8 @@ var DEFAULT_CONFIG = {
   mcpPort: 9527,
   mcpToken: '',
   mcpAutoSync: false,
-  mcpToolNaming: 'full'
+  mcpToolNaming: 'full',
+  mcpExportPath: ''
 };
 
 var CONFIG_KEY = 'ai_req_analyzer_config';

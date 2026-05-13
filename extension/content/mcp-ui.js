@@ -187,7 +187,7 @@ function refreshMainPanelContent() {
   var bodyEl = state.mainPanel.querySelector('.ai-req-main-body');
   if (!bodyEl) return;
 
-  if (state.mcpPanelTab === 'list' || state.mcpPanelTab === 'logs') {
+  if (state.mcpPanelTab === 'list' || state.mcpPanelTab === 'logs' || state.mcpPanelTab === 'localExports') {
     var reqList = bodyEl.querySelector('.ai-req-request-list');
     if (reqList) reqList.style.display = 'none';
     var oldMcp = bodyEl.querySelector('.ai-req-mcp-content');
@@ -196,8 +196,10 @@ function refreshMainPanelContent() {
     mcpContent.className = 'ai-req-mcp-content';
     if (state.mcpPanelTab === 'list') {
       mcpContent.innerHTML = buildMcpToolListHTML();
-    } else {
+    } else if (state.mcpPanelTab === 'logs') {
       mcpContent.innerHTML = buildMcpLogListHTML();
+    } else {
+      mcpContent.innerHTML = buildMcpLocalExportsHTML();
     }
     bodyEl.appendChild(mcpContent);
     bindMcpContentEvents(mcpContent);
@@ -264,6 +266,32 @@ function buildMcpToolListHTML() {
   html += '<div class="ai-req-mcp-tab-bar">';
   html += '<button class="ai-req-mcp-tab' + (state.mcpPanelTab === 'list' ? ' active' : '') + '" data-mcp-tab="list">\u5DE5\u5177\u5217\u8868</button>';
   html += '<button class="ai-req-mcp-tab' + (state.mcpPanelTab === 'logs' ? ' active' : '') + '" data-mcp-tab="logs">\u8C03\u7528\u65E5\u5FD7</button>';
+  html += '<button class="ai-req-mcp-tab' + (state.mcpPanelTab === 'localExports' ? ' active' : '') + '" data-mcp-tab="localExports">\u8BFB\u53D6\u672C\u5730\u5DE5\u5177\u5217\u8868</button>';
+  html += '</div>';
+  return html;
+}
+
+function buildMcpLocalExportsHTML() {
+  var pathDisp = (state.config && state.config.mcpExportPath) ? state.config.mcpExportPath.trim() : '';
+  var html = '';
+  html += '<div class="ai-req-mcp-status-bar">';
+  html += '<span class="ai-req-mcp-status-dot ai-req-mcp-status-dot-off"></span>';
+  html += '<span class="ai-req-mcp-status-text">MCP \u25CB \u672A\u542F\u52A8</span>';
+  html += '<button class="ai-req-mcp-start-btn">\u542F\u52A8</button>';
+  html += '</div>';
+  html += '<div class="ai-req-mcp-local-exports-panel">';
+  html += '<div class="ai-req-mcp-local-path-row"><span class="ai-req-mcp-local-path-label">\u5BFC\u51FA\u76EE\u5F55\uFF1A</span> ';
+  html += '<span class="ai-req-mcp-local-path-value">' +
+    (pathDisp ? escapeHtml(pathDisp) : escapeHtml('\uFF08\u672A\u914D\u7F6E\uFF0C\u8BF7\u6253\u5F00\u8BBE\u7F6E\u586B\u5199 MCP \u5BFC\u51FA\u76EE\u5F55\uFF09')) +
+    '</span></div>';
+  html += '<p class="ai-req-mcp-local-hint">\u9700 MCP \u52A9\u624B\u5DF2\u8FDE\u63A5\uFF1B\u5217\u8868\u7531\u52A9\u624B\u8BFB\u53D6\u672C\u673A\u76EE\u5F55\u3002\u8DEF\u5F84\u5728\u300C\u914D\u7F6E\u300D\u4E2D\u4FEE\u6539\u3002</p>';
+  html += '<button type="button" class="ai-req-btn ai-req-btn-secondary ai-req-mcp-local-refresh">\u5237\u65B0\u5217\u8868</button>';
+  html += '<div class="ai-req-mcp-local-export-list"><div class="ai-req-mcp-local-export-placeholder">\u70B9\u51FB\u300C\u5237\u65B0\u5217\u8868\u300D\u52A0\u8F7D\u5DF2\u5BFC\u51FA\u7684 JSON</div></div>';
+  html += '</div>';
+  html += '<div class="ai-req-mcp-tab-bar">';
+  html += '<button class="ai-req-mcp-tab' + (state.mcpPanelTab === 'list' ? ' active' : '') + '" data-mcp-tab="list">\u5DE5\u5177\u5217\u8868</button>';
+  html += '<button class="ai-req-mcp-tab' + (state.mcpPanelTab === 'logs' ? ' active' : '') + '" data-mcp-tab="logs">\u8C03\u7528\u65E5\u5FD7</button>';
+  html += '<button class="ai-req-mcp-tab' + (state.mcpPanelTab === 'localExports' ? ' active' : '') + '" data-mcp-tab="localExports">\u8BFB\u53D6\u672C\u5730\u5DE5\u5177\u5217\u8868</button>';
   html += '</div>';
   return html;
 }
@@ -281,8 +309,156 @@ function buildMcpLogListHTML() {
   html += '<div class="ai-req-mcp-tab-bar">';
   html += '<button class="ai-req-mcp-tab' + (state.mcpPanelTab === 'list' ? ' active' : '') + '" data-mcp-tab="list">\u5DE5\u5177\u5217\u8868</button>';
   html += '<button class="ai-req-mcp-tab' + (state.mcpPanelTab === 'logs' ? ' active' : '') + '" data-mcp-tab="logs">\u8C03\u7528\u65E5\u5FD7</button>';
+  html += '<button class="ai-req-mcp-tab' + (state.mcpPanelTab === 'localExports' ? ' active' : '') + '" data-mcp-tab="localExports">\u8BFB\u53D6\u672C\u5730\u5DE5\u5177\u5217\u8868</button>';
   html += '</div>';
   return html;
+}
+
+function refreshLocalExportsFileList(mcpContent) {
+  var listEl = mcpContent.querySelector('.ai-req-mcp-local-export-list');
+  if (!listEl) return;
+  var dirPath = state.config && state.config.mcpExportPath ? String(state.config.mcpExportPath).trim() : '';
+  if (!dirPath) {
+    listEl.innerHTML =
+      '<div class="ai-req-mcp-empty">\u8BF7\u5728\u914D\u7F6E\u4E2D\u586B\u5199 MCP \u5BFC\u51FA\u76EE\u5F55\uFF08\u672C\u673A\u7EDD\u5BF9\u8DEF\u5F84\uFF09</div>';
+    return;
+  }
+  listEl.innerHTML = '<div class="ai-req-mcp-local-export-loading">\u52A0\u8F7D\u4E2D...</div>';
+  chrome.runtime.sendMessage({ type: 'MCP_LIST_EXPORT_DIR', dirPath: dirPath }, function (res) {
+    if (chrome.runtime.lastError) {
+      listEl.innerHTML =
+        '<div class="ai-req-mcp-empty">' + escapeHtml(chrome.runtime.lastError.message) + '</div>';
+      return;
+    }
+    if (!res || !res.ok) {
+      listEl.innerHTML =
+        '<div class="ai-req-mcp-empty">' + escapeHtml((res && res.error) || '\u5931\u8D25') + '</div>';
+      return;
+    }
+    var files = res.files || [];
+    if (files.length === 0) {
+      listEl.innerHTML = '<div class="ai-req-mcp-empty">\u76EE\u5F55\u4E2D\u65E0 .json \u6587\u4EF6</div>';
+      return;
+    }
+    var html = '';
+    var fi;
+    for (fi = 0; fi < files.length; fi++) {
+      var f = files[fi];
+      var encName = encodeURIComponent(f.name);
+      var dt = new Date(f.mtimeMs || 0);
+      var timeStr =
+        dt.getFullYear() +
+        '-' +
+        pad2(dt.getMonth() + 1) +
+        '-' +
+        pad2(dt.getDate()) +
+        ' ' +
+        pad2(dt.getHours()) +
+        ':' +
+        pad2(dt.getMinutes());
+      html += '<div class="ai-req-mcp-local-file-row">';
+      html += '<span class="ai-req-mcp-local-file-name">' + escapeHtml(f.name) + '</span>';
+      html += '<span class="ai-req-mcp-local-file-mtime">' + escapeHtml(timeStr) + '</span>';
+      html +=
+        '<button type="button" class="ai-req-btn ai-req-btn-secondary ai-req-mcp-local-imp-skip" data-local-import="merge-skip" data-file-name="' +
+        encName +
+        '">\u5BFC\u5165\uFF08\u5408\u5E76\uFF09</button>';
+      html +=
+        '<button type="button" class="ai-req-btn ai-req-btn-secondary ai-req-mcp-local-imp-ow" data-local-import="merge-overwrite" data-file-name="' +
+        encName +
+        '">\u5BFC\u5165\u5E76\u8986\u76D6</button>';
+      html +=
+        '<button type="button" class="ai-req-btn ai-req-btn-danger ai-req-mcp-local-imp-repl" data-local-import="replace" data-file-name="' +
+        encName +
+        '">\u6E05\u9664\u5E76\u5BFC\u5165</button>';
+      html += '</div>';
+    }
+    listEl.innerHTML = html;
+  });
+}
+
+function runLocalMcpExportImport(_mcpContent, fileName, mode) {
+  var dirPath = state.config && state.config.mcpExportPath ? String(state.config.mcpExportPath).trim() : '';
+  if (!dirPath || !fileName) {
+    showToast('\u8DEF\u5F84\u6216\u6587\u4EF6\u540D\u65E0\u6548');
+    return;
+  }
+  if (mode === 'replace') {
+    if (
+      !confirm(
+        '\u5C06\u6E05\u7A7A\u5F53\u524D\u7AD9\u70B9\u4E0B\u5168\u90E8 MCP \u5DE5\u5177\uFF0C\u518D\u4EE5\u6587\u4EF6\u300C' +
+          fileName +
+          '\u300D\u5168\u91CF\u66FF\u6362\u3002\u6B64\u64CD\u4F5C\u4E0D\u53EF\u64A4\u9500\uFF08\u53EF\u518D\u5BFC\u5165\u5907\u4EFD\uFF09\u3002\u786E\u5B9A\uFF1F'
+      )
+    ) {
+      return;
+    }
+  }
+  chrome.runtime.sendMessage(
+    { type: 'MCP_READ_EXPORT_FILE', dirPath: dirPath, fileName: fileName },
+    function (res) {
+      if (chrome.runtime.lastError) {
+        showToast(chrome.runtime.lastError.message);
+        return;
+      }
+      if (!res || !res.ok) {
+        showToast((res && res.error) || '\u8BFB\u53D6\u5931\u8D25');
+        return;
+      }
+      var parsed;
+      try {
+        parsed = JSON.parse(res.text || '{}');
+      } catch (eParse) {
+        showToast('JSON \u89E3\u6790\u5931\u8D25');
+        return;
+      }
+      var outcome;
+      if (mode === 'merge-skip') {
+        outcome = applyMcpToolsImport(parsed, 'merge', 'skip');
+      } else if (mode === 'merge-overwrite') {
+        outcome = applyMcpToolsImport(parsed, 'merge', 'overwrite');
+      } else {
+        outcome = applyMcpToolsImport(parsed, 'replace');
+      }
+      if (outcome && outcome.ok) {
+        saveMcpTools();
+        chrome.runtime.sendMessage({ type: 'MCP_SYNC_TOOLS' });
+        if (mode === 'replace') {
+          state.selectedMcpToolNames = {};
+        }
+        showToast('\u5DF2\u5BFC\u5165 ' + outcome.imported + ' \u4E2A\u5DE5\u5177');
+      } else {
+        showToast((outcome && outcome.error) || '\u5BFC\u5165\u5931\u8D25');
+      }
+    }
+  );
+}
+
+function bindLocalExportsPanelEvents(mcpContent) {
+  var refreshBtn = mcpContent.querySelector('.ai-req-mcp-local-refresh');
+  if (refreshBtn) {
+    refreshBtn.addEventListener('click', function () {
+      refreshLocalExportsFileList(mcpContent);
+    });
+  }
+  var listEl = mcpContent.querySelector('.ai-req-mcp-local-export-list');
+  if (listEl) {
+    listEl.addEventListener('click', function (ev) {
+      var btn = ev.target.closest('[data-local-import]');
+      if (!btn) return;
+      var mode = btn.getAttribute('data-local-import');
+      var enc = btn.getAttribute('data-file-name');
+      if (!enc || !mode) return;
+      var fileName;
+      try {
+        fileName = decodeURIComponent(enc);
+      } catch (eDec) {
+        return;
+      }
+      runLocalMcpExportImport(mcpContent, fileName, mode);
+    });
+  }
+  refreshLocalExportsFileList(mcpContent);
 }
 
 function bindMcpContentEvents(mcpContent) {
@@ -385,8 +561,7 @@ function bindMcpContentEvents(mcpContent) {
     expAllBtn.addEventListener('click', function () {
       var sanHead = confirm('\u5BFC\u51FA\u65F6\u5220\u9664 Authorization/Cookie \u7B49\u654F\u611F\u5934\uFF1F');
       var pkgFull = buildMcpToolsExportPayload(state.mcpTools || {}, !!sanHead);
-      downloadMcpPkgWithFilename(pkgFull, 'mcp-tools_' + location.hostname + '_' + mcpFmtDateTag());
-      showToast('\u5BFC\u51FA\u5DF2\u4E0B\u8F7D');
+      exportMcpPkgToConfiguredDirOrDownload(pkgFull, 'mcp-tools_' + location.hostname + '_' + mcpFmtDateTag());
     });
   }
 
@@ -403,7 +578,7 @@ function bindMcpContentEvents(mcpContent) {
       for (si = 0; si < snames.length; si++) subset[snames[si]] = state.mcpTools[snames[si]];
       var sanSel = confirm('\u8131\u654F\u5934\u90E8\u518D\u5BFC\u51FA\uFF1F');
       var pkgSel = buildMcpToolsExportPayload(subset, !!sanSel);
-      downloadMcpPkgWithFilename(pkgSel, 'mcp-tools_sel_' + location.hostname + '_' + mcpFmtDateTag());
+      exportMcpPkgToConfiguredDirOrDownload(pkgSel, 'mcp-tools_sel_' + location.hostname + '_' + mcpFmtDateTag());
       showToast('\u5DF2\u9009 ' + snames.length + '\u4E2A\u5DE5\u5177');
     });
   }
@@ -595,6 +770,10 @@ function bindMcpContentEvents(mcpContent) {
       }
     });
   }
+
+  if (state.mcpPanelTab === 'localExports') {
+    bindLocalExportsPanelEvents(mcpContent);
+  }
 }
 
 function refreshMcpStatusBar(mcpContent) {
@@ -625,6 +804,59 @@ function pad2(n) {
 function mcpFmtDateTag() {
   var d = new Date();
   return d.getFullYear() + pad2(d.getMonth() + 1) + pad2(d.getDate());
+}
+
+var MCP_EXPORT_NM_UTF8_SOFT_LIMIT = 1040000;
+
+function exportMcpPkgToConfiguredDirOrDownload(pkg, filenameBase) {
+  var dir = state.config && state.config.mcpExportPath ? String(state.config.mcpExportPath).trim() : '';
+  var jsonText = JSON.stringify(pkg, null, 2);
+  var byteLen = jsonText.length;
+  try {
+    if (typeof TextEncoder !== 'undefined') byteLen = new TextEncoder().encode(jsonText).length;
+  } catch (eTe) {}
+
+  function fallbackDownload(extraMsg) {
+    downloadMcpPkgWithFilename(pkg, filenameBase);
+    if (extraMsg) showToast(extraMsg);
+  }
+
+  if (!dir) {
+    fallbackDownload('\u672A\u914D\u7F6E MCP \u5BFC\u51FA\u76EE\u5F55\uFF0C\u5DF2\u4F7F\u7528\u6D4F\u89C8\u5668\u4E0B\u8F7D\u5230\u9ED8\u8BA4\u6587\u4EF6\u5939');
+    return;
+  }
+
+  if (byteLen > MCP_EXPORT_NM_UTF8_SOFT_LIMIT) {
+    fallbackDownload(
+      '\u5BFC\u51FA\u8FC7\u5927\uFF08Native Messaging \u9650\u5236 ~1MB\uFF09\uFF0C\u5DF2\u6539\u4E3A\u6D4F\u89C8\u5668\u4E0B\u8F7D'
+    );
+    return;
+  }
+
+  var baseName = /\.json$/i.test(filenameBase) ? filenameBase : filenameBase + '.json';
+
+  chrome.runtime.sendMessage(
+    {
+      type: 'MCP_WRITE_EXPORT_FILE',
+      dirPath: dir,
+      fileName: baseName,
+      text: jsonText
+    },
+    function (res) {
+      if (chrome.runtime.lastError) {
+        fallbackDownload('\u5199\u5165\u5931\u8D25\uFF0C\u5DF2\u6539\u4E3A\u4E0B\u8F7D\uFF1A' + chrome.runtime.lastError.message);
+        return;
+      }
+      if (!res || !res.ok) {
+        fallbackDownload(
+          '\u5199\u5165\u914D\u7F6E\u76EE\u5F55\u5931\u8D25\uFF0C\u5DF2\u6539\u4E3A\u4E0B\u8F7D' +
+            ((res && res.error) ? '\uFF1A' + res.error : '')
+        );
+        return;
+      }
+      showToast('\u5DF2\u5199\u5165\u914D\u7F6E\u76EE\u5F55\uFF1A' + baseName);
+    }
+  );
 }
 
 function downloadMcpPkgWithFilename(pkg, filenameBase) {

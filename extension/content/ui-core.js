@@ -114,8 +114,10 @@ function createMainPanel() {
   mcpTabBtn.title = 'MCP \u5DE5\u5177\u7BA1\u7406';
   mcpTabBtn.addEventListener('click', function (e) {
     e.stopPropagation();
-    state.mcpPanelTab = state.mcpPanelTab === 'list' ? null : 'list';
-    if (state.mcpPanelTab === 'list') {
+    var wasOpen =
+      state.mcpPanelTab === 'list' || state.mcpPanelTab === 'logs' || state.mcpPanelTab === 'localExports';
+    state.mcpPanelTab = wasOpen ? null : 'list';
+    if (state.mcpPanelTab) {
       mcpTabBtn.classList.add('ai-req-mcp-tab-btn-active');
     } else {
       mcpTabBtn.classList.remove('ai-req-mcp-tab-btn-active');
@@ -1492,6 +1494,8 @@ function openConfigPanel() {
   panel.querySelector('.ai-req-config-mcp-port').value = state.config.mcpPort || 9527;
   panel.querySelector('.ai-req-config-mcp-token').value = state.config.mcpToken || '';
   panel.querySelector('.ai-req-config-mcp-auto-sync').checked = !!state.config.mcpAutoSync;
+  var exportPathEl = panel.querySelector('.ai-req-config-mcp-export-path');
+  if (exportPathEl) exportPathEl.value = state.config.mcpExportPath || '';
   var namingEl = panel.querySelector('.ai-req-config-mcp-tool-naming');
   if (namingEl) namingEl.value = state.config.mcpToolNaming === 'compact' ? 'compact' : 'full';
 
@@ -1553,6 +1557,13 @@ function createConfigPanel() {
   mcpAutoSyncField.className = 'ai-req-config-field';
   mcpAutoSyncField.innerHTML = '<label class="ai-req-config-label">\u81EA\u52A8\u540C\u6B65</label><label class="ai-req-config-checkbox-label"><input type="checkbox" class="ai-req-config-mcp-auto-sync"> \u542F\u52A8\u65F6\u81EA\u52A8\u540C\u6B65\u5DE5\u5177\u5217\u8868</label>';
 
+  var mcpExportPathField = document.createElement('div');
+  mcpExportPathField.className = 'ai-req-config-field';
+  mcpExportPathField.innerHTML =
+    '<label class="ai-req-config-label">MCP \u5BFC\u51FA\u76EE\u5F55\uFF08\u672C\u673A\uFF09</label>' +
+    '<input type="text" class="ai-req-config-input ai-req-config-mcp-export-path" placeholder="D:\\\\exports\\\\mcp \u6216 /home/user/mcp-export">' +
+    '<div class="ai-req-config-hint">\u300C\u5168\u90E8/\u5DF2\u9009\u5BFC\u51FA\u300D\u5728\u672C\u5B57\u6BB5\u975E\u7A7A\u4E14 MCP \u52A9\u624B\u5DF2\u542F\u52A8\u65F6\u4F1A\u5199\u5165\u8BE5\u76EE\u5F55\uFF1B\u5426\u5219\u8D70\u6D4F\u89C8\u5668\u9ED8\u8BA4\u4E0B\u8F7D\u5939\u3002\u300C\u8BFB\u53D6\u672C\u5730\u5DE5\u5177\u5217\u8868\u300DTAB \u9700\u52A9\u624B\u5217\u76EE\u5F55\u5185 JSON\u3002</div>';
+
   var actions = document.createElement('div');
   actions.className = 'ai-req-config-actions';
 
@@ -1569,6 +1580,8 @@ function createConfigPanel() {
     state.config.mcpAutoSync = modal.querySelector('.ai-req-config-mcp-auto-sync').checked;
     var namingSel = modal.querySelector('.ai-req-config-mcp-tool-naming');
     state.config.mcpToolNaming = (namingSel && namingSel.value === 'compact') ? 'compact' : 'full';
+    var exportPathInput = modal.querySelector('.ai-req-config-mcp-export-path');
+    state.config.mcpExportPath = exportPathInput ? exportPathInput.value.trim() : '';
     saveConfig();
     closeConfigPanel();
   });
@@ -1593,6 +1606,7 @@ function createConfigPanel() {
   modal.appendChild(mcpTokenField);
   modal.appendChild(mcpNamingField);
   modal.appendChild(mcpAutoSyncField);
+  modal.appendChild(mcpExportPathField);
   modal.appendChild(actions);
   overlay.appendChild(modal);
 
