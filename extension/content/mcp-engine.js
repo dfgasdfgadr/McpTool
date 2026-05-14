@@ -1031,6 +1031,40 @@ function deleteMcpTool(toolName) {
   }
 }
 
+/** 导出工具携带的 X-Csrf-Token 易过期；同源 GET /projex 由页面 Cookie 校验时，错误 Token 会导致业务 400。优先剥离过时 Token，再从页面 DOM 补当前会话 Token。 */
+function pickLiveCsrfTokenFromPage() {
+  try {
+    var sel =
+      'meta[name="csrf-token"],meta[name="_csrf"],meta[name="x-csrf-token"],meta[name="csrf_token"]';
+    var m = document.querySelector(sel);
+    if (m && m.getAttribute('content')) return String(m.getAttribute('content')).trim();
+  } catch (e1) {}
+  try {
+    if (window.__csrf_token__) return String(window.__csrf_token__).trim();
+  } catch (e2) {}
+  return '';
+}
+
+function buildMcpProxyFetchHeaders(method, url, rawHeaders) {
+  var out = {};
+  var src = rawHeaders || {};
+  var u = String(url || '');
+  var isProjex = u.indexOf('/projex/') >= 0;
+  var keys = Object.keys(src);
+  for (var i = 0; i < keys.length; i++) {
+    var k = keys[i];
+    var lk = String(k).toLowerCase();
+    if (lk === 'cookie') continue;
+    if (isProjex && lk === 'x-csrf-token') continue;
+    out[k] = src[k];
+  }
+  if (isProjex) {
+    var live = pickLiveCsrfTokenFromPage();
+    if (live) out['X-Csrf-Token'] = live;
+  }
+  return out;
+}
+
 function handleMcpProxyRequest(payload, sendResponse) {
   var url = payload.url;
   var method = (payload.method || 'GET').toUpperCase();
@@ -1061,8 +1095,9 @@ function handleMcpProxyRequest(payload, sendResponse) {
 
   var fetchOpts = {
     method: method,
-    headers: headers,
-    signal: controller.signal
+    headers: buildMcpProxyFetchHeaders(method, url, headers),
+    signal: controller.signal,
+    credentials: 'include'
   };
 
   if (method !== 'GET' && method !== 'HEAD' && body !== undefined && body !== null) {
@@ -1112,6 +1147,8 @@ function handleMcpProxyRequest(payload, sendResponse) {
     var errMsg = '请求失败';
     if (err && err.name === 'AbortError') {
       errMsg = '请求超时';
+    } else if (err && err.message) {
+      errMsg = '请求失败: ' + String(err.message).substring(0, 240);
     }
     sendResponse({
       ok: false,

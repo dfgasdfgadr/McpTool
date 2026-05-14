@@ -274,12 +274,13 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
 
       var fullUrl = origin + pathname + queryString;
 
-      findTargetTab(origin).then(function (tab) {
+      findBestTabForProxy(origin, fullUrl, pathname).then(function (tab) {
         if (tab) {
+          var proxyUrlTest = rewriteMcpProxyUrlForTab(tab, fullUrl);
           var proxyPayload = {
             callId: 'test_' + Date.now(),
             toolName: testToolName,
-            url: fullUrl,
+            url: proxyUrlTest,
             method: method,
             headers: execHeaders,
             body: bodyData,
@@ -561,6 +562,54 @@ function handleHelperMessage(msg) {
   }
 }
 
+/**
+ * 页面内容脚本发起 fetch 必须与标签页同源（或目标接口允许 CORS）。
+ * 工具元数据里的 origin 常为 uiless-devops 等子域，与用户所在 devops.aliyun.com 不一致时会 Failed to fetch。
+ * Projex 接口路径一般为 /projex/...，可在主域同源下发。
+ */
+function rewriteMcpProxyUrlForTab(tab, fullUrl) {
+  try {
+    var tabUrl = new URL(tab.url);
+    var req = new URL(fullUrl);
+    if (req.pathname.indexOf('/projex/') < 0) return fullUrl;
+    if (req.origin === tabUrl.origin) return fullUrl;
+    var tabHost = tabUrl.hostname;
+    var tabOk =
+      tabHost === 'devops.aliyun.com' ||
+      tabHost.endsWith('.devops.aliyun.com');
+    if (!tabOk) return fullUrl;
+    return tabUrl.origin + req.pathname + req.search + (req.hash || '');
+  } catch (e) {
+    return fullUrl;
+  }
+}
+
+/** 依次尝试多个页面 origin，解决工具 _meta.origin 与用户当前标签 hostname 不一致时 tabs.query 匹配不到的问题（如云效主站 vs uiless 子域）。 */
+function findBestTabForProxy(resolvedOrigin, fullUrl, pathname) {
+  var list = [];
+  function addOriginCandidate(o) {
+    var b = String(o || '').trim().replace(/\/+$/, '');
+    if (!b || !/^https?:\/\//i.test(b)) return;
+    if (list.indexOf(b) < 0) list.push(b);
+  }
+  addOriginCandidate(resolvedOrigin);
+  try {
+    addOriginCandidate(new URL(fullUrl).origin);
+  } catch (e0) {}
+  var pathStr = String(pathname || '');
+  var fullStr = String(fullUrl || '');
+  if (pathStr.indexOf('/projex/') >= 0 || fullStr.indexOf('/projex/') >= 0) {
+    addOriginCandidate('https://devops.aliyun.com');
+  }
+  function chain(i) {
+    if (i >= list.length) return Promise.resolve(null);
+    return findTargetTab(list[i]).then(function (tab) {
+      return tab || chain(i + 1);
+    });
+  }
+  return chain(0);
+}
+
 function findTargetTab(origin) {
   return new Promise(function (resolve) {
     var base = String(origin || '').replace(/\/+$/, '');
@@ -686,12 +735,13 @@ function handleMcpToolCall(callId, toolName, toolArguments) {
 
     var fullUrl = origin + pathname + queryString;
 
-    findTargetTab(origin).then(function (tab) {
+    findBestTabForProxy(origin, fullUrl, pathname).then(function (tab) {
       if (tab) {
+        var proxyUrl = rewriteMcpProxyUrlForTab(tab, fullUrl);
         var proxyPayload = {
           callId: callId,
           toolName: toolName,
-          url: fullUrl,
+          url: proxyUrl,
           method: method,
           headers: execHeaders,
           body: bodyData,
