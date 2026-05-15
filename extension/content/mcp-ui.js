@@ -1,3 +1,6 @@
+/** \u7AD9\u70B9\u4E13\u7528\u503C\uFF1A\u5217\u8868\u4E2D\u6392\u9664\u5F53\u524D\u6807\u7B7E\u9875 hostname \u6765\u6E90\u7684 merged \u5DE5\u5177 */
+var MCP_SITE_FILTER_EXCLUDE_CURRENT = '__exclude_current__';
+
 function ensureMcpListUi() {
   if (!state.mcpListUi) {
     state.mcpListUi = {
@@ -5,9 +8,30 @@ function ensureMcpListUi() {
       groupMode: 'none',
       filterEnabled: 'all',
       riskLevels: {},
-      toolbarCollapsed: false
+      toolbarCollapsed: false,
+      siteFilter: 'all'
     };
+  } else if (!state.mcpListUi.siteFilter) {
+    state.mcpListUi.siteFilter = 'all';
   }
+}
+
+function getMcpListToolsMap() {
+  var ds = state.mcpViewDataset;
+  if (!ds) return {};
+  if (ds.ok && ds.tools && typeof ds.tools === 'object') return ds.tools;
+  if (ds.ok === false) return {};
+  return state.mcpTools || {};
+}
+
+function resolveMcpToolHostFromView(toolName) {
+  var ds = state.mcpViewDataset;
+  if (ds && ds.hostByTool && ds.hostByTool[toolName]) return ds.hostByTool[toolName];
+  return location.hostname;
+}
+
+function mcpSafeFilenameSegment(seg) {
+  return String(seg || 'host').replace(/[^a-zA-Z0-9._-]+/g, '_').substring(0, 120);
 }
 
 function passesMcpListFilters(tool, ui) {
@@ -50,12 +74,13 @@ function getFilteredSortedMcpToolNames() {
   ensureMcpListUi();
   var ui = state.mcpListUi;
   var kwLower = (ui.keyword || '').trim().toLowerCase();
-  var all = Object.keys(state.mcpTools || {});
+  var toolsMap = getMcpListToolsMap();
+  var all = Object.keys(toolsMap || {});
   var pass = [];
   var ii;
   for (ii = 0; ii < all.length; ii++) {
     var nm = all[ii];
-    var tl = state.mcpTools[nm];
+    var tl = toolsMap[nm];
     if (!tl) continue;
     if (!passesMcpListFilters(tl, ui)) continue;
     if (!mcpToolMatchesKeyword(tl, nm, kwLower)) continue;
@@ -69,18 +94,28 @@ function buildMcpToolListInnerHTML() {
   ensureMcpListUi();
   var ui = state.mcpListUi;
   var html = '';
+  if (!state.mcpViewDataset) {
+    return '<div class="ai-req-mcp-empty">\u6B63\u5728\u52A0\u8F7D\u5DE5\u5177\u5217\u8868...</div>';
+  }
+  if (!state.mcpViewDataset.ok) {
+    return '<div class="ai-req-mcp-empty">\u65E0\u6CD5\u52A0\u8F7D\u5DE5\u5177\u6570\u636E\uFF0C\u8BF7\u5173\u95ED\u518D\u6253\u5F00 MCP \u9762\u677F\u91CD\u8BD5</div>';
+  }
+  var toolsMap = getMcpListToolsMap();
+  var hostByTool = (state.mcpViewDataset && state.mcpViewDataset.hostByTool) || {};
+  var sfUi = ui.siteFilter || 'all';
+  var showHostChip = sfUi === 'all' || sfUi === MCP_SITE_FILTER_EXCLUDE_CURRENT;
   var toolNames = getFilteredSortedMcpToolNames();
   var gm2 = ui.groupMode || 'none';
   var lastGk = '\u0000';
-  if (Object.keys(state.mcpTools || {}).length === 0) {
-    html += '<div class="ai-req-mcp-empty">\u6682\u65E0 MCP \u5DE5\u5177\uFF0C\u8BF7\u4ECE\u8BF7\u6C42\u5217\u8868\u751F\u6210</div>';
+  if (Object.keys(toolsMap || {}).length === 0) {
+    html += '<div class="ai-req-mcp-empty">\u6682\u65E0 MCP \u5DE5\u5177\uFF08\u5F53\u524D\u7B5B\u9009\u8303\u56F4\uFF09\uFF0C\u53EF\u5207\u6362\u300C\u5168\u90E8\u7AD9\u70B9\u300D\u6216\u6362\u7AD9\u70B9\u67E5\u770B</div>';
   } else if (toolNames.length === 0) {
     html += '<div class="ai-req-mcp-empty">\u65E0\u5339\u914D\u9879\uFF0C\u8C03\u6574\u7B5B\u9009\u6216\u5173\u952E\u8BCD</div>';
   }
   var ti;
   for (ti = 0; ti < toolNames.length; ti++) {
     var name = toolNames[ti];
-    var tool = state.mcpTools[name];
+    var tool = toolsMap[name];
     var riskLevel = (tool._meta && tool._meta.riskLevel) || 'low';
     var enabled = tool.enabled !== false;
     var desc = tool.description || '';
@@ -100,6 +135,12 @@ function buildMcpToolListInnerHTML() {
     html += '<div class="ai-req-mcp-tool-right">';
     html += '<div class="ai-req-mcp-tool-header">';
     html += '<span class="ai-req-mcp-tool-name" title="' + escapeHtml(name) + '">' + escapeHtml(name) + '</span>';
+    if (showHostChip && hostByTool[name]) {
+      html +=
+        '<span class="ai-req-mcp-tool-host" title="\u6765\u6E90\u7AD9\u70B9">' +
+        escapeHtml(hostByTool[name]) +
+        '</span>';
+    }
     html += '<span class="ai-req-mcp-risk ai-req-mcp-risk-' + escapeHtml(riskLevel) + '">' + escapeHtml(riskLevel) + '</span>';
     html += '<label class="ai-req-mcp-toggle"><input type="checkbox" class="ai-req-mcp-tool-enabled" data-tool-name="' + escapeHtml(name) + '"' + (enabled ? ' checked' : '') + '></label>';
     html += '</div>';
@@ -119,14 +160,105 @@ function patchMcpToolListSection(mcpContent) {
   if (!mcpContent || state.mcpPanelTab !== 'list') return;
   var listEl = mcpContent.querySelector('.ai-req-mcp-tool-list');
   if (!listEl) return;
-  listEl.innerHTML = buildMcpToolListInnerHTML();
-  var miniBar = mcpContent.querySelector('.ai-req-mcp-toolbar-mini');
-  if (miniBar) {
-    var fv = getFilteredSortedMcpToolNames().length;
-    var ta = Object.keys(state.mcpTools || {}).length;
-    miniBar.textContent = '\u663E\u793A ' + fv + ' / \u5171 ' + ta;
-  }
-  bindMcpToolListRowEvents(mcpContent);
+
+  ensureMcpListUi();
+  var sfReq = state.mcpListUi.siteFilter || 'all';
+
+  chrome.runtime.sendMessage(
+    {
+      type: 'MCP_GET_TOOLS_VIEW',
+      siteFilter: sfReq,
+      currentTabHostname: typeof location !== 'undefined' ? location.hostname : ''
+    },
+    function (resp) {
+    if (chrome.runtime.lastError) {
+      console.warn('[AI_REQ_ANALYZER] MCP_GET_TOOLS_VIEW:', chrome.runtime.lastError.message);
+      state.mcpViewDataset = { ok: false };
+    } else {
+      state.mcpViewDataset = resp && resp.ok ? resp : { ok: false };
+    }
+
+    var siteSel = mcpContent.querySelector('.ai-req-mcp-site-filter');
+    var ds = state.mcpViewDataset;
+    var hosts = (ds && ds.hosts) || [];
+
+    if (siteSel && ds && ds.ok) {
+      var curSf = state.mcpListUi.siteFilter || 'all';
+      if (
+        curSf !== 'all' &&
+        curSf !== MCP_SITE_FILTER_EXCLUDE_CURRENT &&
+        hosts.indexOf(curSf) === -1
+      ) {
+        state.mcpListUi.siteFilter = 'all';
+        patchMcpToolListSection(mcpContent);
+        return;
+      }
+      var mergedCnt = typeof ds.mergedToolCount === 'number' ? ds.mergedToolCount : 0;
+      var exRemain =
+        typeof ds.excludeCurrentRemainCount === 'number' ? ds.excludeCurrentRemainCount : mergedCnt;
+      var htc = ds.hostToolCounts || {};
+      var tabHost = typeof location !== 'undefined' ? location.hostname : '';
+      var opts =
+        '<option value="all"' +
+        (curSf === 'all' ? ' selected' : '') +
+        '>\u5168\u90E8\u7AD9\u70B9\uFF08' +
+        mergedCnt +
+        '\uFF09\u00B7Cursor\u5408\u5E76</option>';
+      opts +=
+        '<option value="' +
+        MCP_SITE_FILTER_EXCLUDE_CURRENT +
+        '"' +
+        (curSf === MCP_SITE_FILTER_EXCLUDE_CURRENT ? ' selected' : '') +
+        '>\u6392\u9664\u5F53\u524D\u9875\uFF08' +
+        exRemain +
+        '\uFF09\u00B7\u9690\u85CF ' +
+        escapeHtml(tabHost || '\uFF08\u672A\u77E5\uFF09') +
+        '</option>';
+      var hi;
+      for (hi = 0; hi < hosts.length; hi++) {
+        var h = hosts[hi];
+        var hn = htc[h] != null ? htc[h] : 0;
+        opts +=
+          '<option value="' +
+          escapeHtml(h) +
+          '"' +
+          (h === curSf ? ' selected' : '') +
+          '>' +
+          escapeHtml(h) +
+          ' (' +
+          hn +
+          ')</option>';
+      }
+      siteSel.innerHTML = opts;
+      siteSel.value = curSf;
+    }
+
+    var exBtnSync = mcpContent.querySelector('.ai-req-mcp-exclude-current-btn');
+    if (exBtnSync) {
+      var onEx = (state.mcpListUi.siteFilter || 'all') === MCP_SITE_FILTER_EXCLUDE_CURRENT;
+      exBtnSync.classList.toggle('ai-req-chip-on', onEx);
+      exBtnSync.textContent = onEx ? '\u663E\u793A\u5168\u90E8\u7AD9\u70B9' : '\u6392\u9664\u5F53\u524D\u9875';
+    }
+
+    listEl.innerHTML = buildMcpToolListInnerHTML();
+
+    var miniBar = mcpContent.querySelector('.ai-req-mcp-toolbar-mini');
+    if (miniBar) {
+      var fv = getFilteredSortedMcpToolNames().length;
+      var ta = Object.keys(getMcpListToolsMap() || {}).length;
+      var line = '\u663E\u793A ' + fv + ' / \u5171 ' + ta;
+      if (ds && ds.ok && typeof ds.mergedToolCount === 'number') {
+        line +=
+          ' \u00B7 \u5168\u5E93\u5408\u5E76 ' +
+          ds.mergedToolCount +
+          ' \u00B7 Cursor\u5DF2\u542F\u7528 ' +
+          ds.mergedEnabledCount;
+      }
+      miniBar.textContent = line;
+    }
+
+    bindMcpToolListRowEvents(mcpContent);
+  });
 }
 
 function bindMcpToolListRowEvents(mcpContent) {
@@ -135,9 +267,8 @@ function bindMcpToolListRowEvents(mcpContent) {
   for (ei = 0; ei < enabledChecks.length; ei++) {
     enabledChecks[ei].addEventListener('change', function () {
       var tName = this.getAttribute('data-tool-name');
-      if (state.mcpTools[tName]) {
-        state.mcpTools[tName].enabled = this.checked;
-        saveMcpTools();
+      var host = resolveMcpToolHostFromView(tName);
+      if (setMcpToolEnabledOnHost(host, tName, this.checked)) {
         chrome.runtime.sendMessage({ type: 'MCP_SYNC_TOOLS' });
         if (state.mcpPanelTab === 'list') patchMcpToolListSection(mcpContent);
       }
@@ -163,7 +294,7 @@ function bindMcpToolListRowEvents(mcpContent) {
     deleteBtns[di].addEventListener('click', function () {
       var dName = this.getAttribute('data-tool-name');
       if (confirm('\u786E\u5B9A\u5220\u9664\u5DE5\u5177 "' + dName + '"\uFF1F')) {
-        deleteMcpTool(dName);
+        deleteMcpToolFromHost(resolveMcpToolHostFromView(dName), dName);
         chrome.runtime.sendMessage({ type: 'MCP_SYNC_TOOLS' });
         patchMcpToolListSection(mcpContent);
         showToast('\u5DF2\u5220\u9664: ' + dName);
@@ -228,6 +359,14 @@ function buildMcpToolListHTML() {
   html += '<span class="ai-req-mcp-status-dot ai-req-mcp-status-dot-off"></span>';
   html += '<span class="ai-req-mcp-status-text">MCP \u25CB \u672A\u542F\u52A8</span>';
   html += '<button class="ai-req-mcp-start-btn">\u542F\u52A8</button>';
+  html += '</div>';
+  html += '<div class="ai-req-mcp-site-filter-row">';
+  html += '<label class="ai-req-mcp-site-filter-label">\u7AD9\u70B9</label>';
+  html += '<select class="ai-req-mcp-site-filter" aria-label="MCP \u5DE5\u5177\u6309\u7AD9\u70B9\u7B5B\u9009"></select>';
+  html +=
+    '<button type="button" class="ai-req-btn ai-req-btn-secondary ai-req-mcp-exclude-current-btn">\u6392\u9664\u5F53\u524D\u9875</button>';
+  html +=
+    '<span class="ai-req-mcp-site-filter-hint">\u4E0B\u62C9\u663E\u793A\u5404\u7AD9\u5DE5\u5177\u6570\uFF1B\u300C\u6392\u9664\u5F53\u524D\u9875\u300D\u9690\u85CF\u5F53\u524D\u6807\u7B7E\u9875\u57DF\u540D\u5728\u5168\u5E93\u5408\u5E76\u4E2D\u7684\u5DE5\u5177\u3002</span>';
   html += '</div>';
   html += '<div class="ai-req-mcp-filter-row">';
   html += '<input type="search" class="ai-req-mcp-list-search" placeholder="\u641C\u7D22\u5DE5\u5177/\u63CF\u8FF0/path..." value="' + escapeHtml(ui.keyword || '') + '">';
@@ -465,12 +604,6 @@ function bindMcpContentEvents(mcpContent) {
   refreshMcpStatusBar(mcpContent);
 
   ensureMcpListUi();
-  var miniBar = mcpContent.querySelector('.ai-req-mcp-toolbar-mini');
-  if (miniBar && state.mcpPanelTab === 'list') {
-    var fv = getFilteredSortedMcpToolNames().length;
-    var ta = Object.keys(state.mcpTools || {}).length;
-    miniBar.textContent = '\u663E\u793A ' + fv + ' / \u5171 ' + ta;
-  }
 
   var collapseTb = mcpContent.querySelector('.ai-req-mcp-toolbar-collapse-btn');
   if (collapseTb) {
@@ -478,6 +611,28 @@ function bindMcpContentEvents(mcpContent) {
       ensureMcpListUi();
       state.mcpListUi.toolbarCollapsed = !state.mcpListUi.toolbarCollapsed;
       refreshMainPanelContent();
+    });
+  }
+
+  var siteFilterSel = mcpContent.querySelector('.ai-req-mcp-site-filter');
+  if (siteFilterSel && state.mcpPanelTab === 'list') {
+    siteFilterSel.addEventListener('change', function () {
+      ensureMcpListUi();
+      state.mcpListUi.siteFilter = siteFilterSel.value || 'all';
+      patchMcpToolListSection(mcpContent);
+    });
+  }
+
+  var exCurBtn = mcpContent.querySelector('.ai-req-mcp-exclude-current-btn');
+  if (exCurBtn && state.mcpPanelTab === 'list') {
+    exCurBtn.addEventListener('click', function () {
+      ensureMcpListUi();
+      if ((state.mcpListUi.siteFilter || 'all') === MCP_SITE_FILTER_EXCLUDE_CURRENT) {
+        state.mcpListUi.siteFilter = 'all';
+      } else {
+        state.mcpListUi.siteFilter = MCP_SITE_FILTER_EXCLUDE_CURRENT;
+      }
+      patchMcpToolListSection(mcpContent);
     });
   }
 
@@ -553,15 +708,26 @@ function bindMcpContentEvents(mcpContent) {
   }
 
   if (state.mcpPanelTab === 'list') {
-    bindMcpToolListRowEvents(mcpContent);
+    patchMcpToolListSection(mcpContent);
   }
 
   var expAllBtn = mcpContent.querySelector('.ai-req-mcp-exp-all');
   if (expAllBtn) {
     expAllBtn.addEventListener('click', function () {
       var sanHead = confirm('\u5BFC\u51FA\u65F6\u5220\u9664 Authorization/Cookie \u7B49\u654F\u611F\u5934\uFF1F');
-      var pkgFull = buildMcpToolsExportPayload(state.mcpTools || {}, !!sanHead);
-      exportMcpPkgToConfiguredDirOrDownload(pkgFull, 'mcp-tools_' + location.hostname + '_' + mcpFmtDateTag());
+      var mapFull = getMcpListToolsMap();
+      var pkgFull = buildMcpToolsExportPayload(mapFull, !!sanHead);
+      var sfTag = state.mcpListUi.siteFilter || 'all';
+      var fnameBase;
+      if (sfTag === 'all') {
+        fnameBase = 'mcp-tools_allmerged_' + mcpFmtDateTag();
+      } else if (sfTag === MCP_SITE_FILTER_EXCLUDE_CURRENT) {
+        fnameBase =
+          'mcp-tools_exclude_' + mcpSafeFilenameSegment(location.hostname) + '_' + mcpFmtDateTag();
+      } else {
+        fnameBase = 'mcp-tools_' + mcpSafeFilenameSegment(sfTag) + '_' + mcpFmtDateTag();
+      }
+      exportMcpPkgToConfiguredDirOrDownload(pkgFull, fnameBase);
     });
   }
 
@@ -575,10 +741,19 @@ function bindMcpContentEvents(mcpContent) {
       }
       var subset = {};
       var si;
-      for (si = 0; si < snames.length; si++) subset[snames[si]] = state.mcpTools[snames[si]];
+      var tmSel = getMcpListToolsMap();
+      for (si = 0; si < snames.length; si++) subset[snames[si]] = tmSel[snames[si]];
       var sanSel = confirm('\u8131\u654F\u5934\u90E8\u518D\u5BFC\u51FA\uFF1F');
       var pkgSel = buildMcpToolsExportPayload(subset, !!sanSel);
-      exportMcpPkgToConfiguredDirOrDownload(pkgSel, 'mcp-tools_sel_' + location.hostname + '_' + mcpFmtDateTag());
+      var sfSel = state.mcpListUi.siteFilter || 'all';
+      var selMid =
+        sfSel === 'all'
+          ? 'merged'
+          : sfSel === MCP_SITE_FILTER_EXCLUDE_CURRENT
+            ? 'exclude_' + mcpSafeFilenameSegment(location.hostname)
+            : mcpSafeFilenameSegment(sfSel);
+      var fnameSel = 'mcp-tools_sel_' + selMid + '_' + mcpFmtDateTag();
+      exportMcpPkgToConfiguredDirOrDownload(pkgSel, fnameSel);
       showToast('\u5DF2\u9009 ' + snames.length + '\u4E2A\u5DE5\u5177');
     });
   }
@@ -653,17 +828,32 @@ function bindMcpContentEvents(mcpContent) {
         showToast('\u5408\u5E76\u81F3\u5C11\u9009\u4E24\u9879');
         return;
       }
-      var mobjs = [];
+      var hbMerge = (state.mcpViewDataset && state.mcpViewDataset.hostByTool) || {};
+      var hostsSeen = {};
       var mi;
       for (mi = 0; mi < mnames.length; mi++) {
-        if (state.mcpTools[mnames[mi]]) mobjs.push(state.mcpTools[mnames[mi]]);
+        var hhM = hbMerge[mnames[mi]];
+        if (hhM) hostsSeen[hhM] = true;
+      }
+      var uh = Object.keys(hostsSeen);
+      if (uh.length !== 1) {
+        showToast(
+          '\u5408\u5E76\u4EC5\u652F\u6301\u540C\u4E00\u7AD9\u70B9\u4E0B\u7684\u5DE5\u5177\uFF0C\u8BF7\u5207\u6362\u7AD9\u70B9\u7B5B\u9009\u6216\u53EA\u9009\u540C\u4E00\u57DF\u540D\u6765\u6E90\u7684\u9879'
+        );
+        return;
+      }
+      var targetHost = uh[0];
+      var toolsObjMerge = loadToolsObjectForHostname(targetHost);
+      var mobjs = [];
+      for (mi = 0; mi < mnames.length; mi++) {
+        if (toolsObjMerge[mnames[mi]]) mobjs.push(toolsObjMerge[mnames[mi]]);
       }
       try {
         var mergedToolDef = mergeMcpToolDefinitions(mobjs);
-        for (mi = 0; mi < mnames.length; mi++) delete state.mcpTools[mnames[mi]];
+        for (mi = 0; mi < mnames.length; mi++) delete toolsObjMerge[mnames[mi]];
         state.selectedMcpToolNames = {};
-        state.mcpTools[mergedToolDef.name] = mergedToolDef;
-        saveMcpTools();
+        toolsObjMerge[mergedToolDef.name] = mergedToolDef;
+        persistToolsObjectForHostname(targetHost, toolsObjMerge);
         chrome.runtime.sendMessage({ type: 'MCP_SYNC_TOOLS' });
         patchMcpToolListSection(mcpContent);
         showToast('\u5DF2\u5408\u5E76\u4E3A ' + mergedToolDef.name);
@@ -677,7 +867,14 @@ function bindMcpContentEvents(mcpContent) {
   if (dedupeMcBtn) {
     dedupeMcBtn.addEventListener('click', function () {
       if (!confirm('\u6309\u8DEF\u5F84\u6A21\u677F/pathPatternKey \u6216 METHOD+pathname\u7B7E\u540D\u4FDD\u7559\u5B57\u5178\u5E8F\u9996\u4E2A\u5DE5\u5177\uFF0C\u5220\u9664\u5176\u4F59\u91CD\u590D\u9879\u3002\u786E\u5B9A\uFF1F')) return;
-      var nDed = removeDuplicateMcpToolsByConflictKey();
+      var sfDed = state.mcpListUi.siteFilter || 'all';
+      if (sfDed === 'all' || sfDed === MCP_SITE_FILTER_EXCLUDE_CURRENT) {
+        showToast(
+          '\u8BF7\u5148\u5728\u300C\u7AD9\u70B9\u300D\u4E2D\u9009\u62E9\u5177\u4F53\u57DF\u540D\uFF0C\u518D\u6267\u884C\u5220\u9664\u91CD\u590D\uFF08\u4EC5\u9488\u5BF9\u5355\u7AD9\u5B58\u50A8\uFF09'
+        );
+        return;
+      }
+      var nDed = removeDuplicateMcpToolsByConflictKeyForHostname(sfDed);
       chrome.runtime.sendMessage({ type: 'MCP_SYNC_TOOLS' });
       patchMcpToolListSection(mcpContent);
       showToast(nDed ? '\u5DF2\u5220\u9664\u91CD\u590D ' + nDed + ' \u4E2A' : '\u65E0\u91CD\u590D\u5DE5\u5177');
@@ -693,8 +890,13 @@ function bindMcpContentEvents(mcpContent) {
         return;
       }
       if (!confirm('\u786E\u5B9A\u5220\u9664\u5DF2\u9009 ' + dnm.length + ' \u9879\uFF1F')) return;
+      var hbDel = (state.mcpViewDataset && state.mcpViewDataset.hostByTool) || {};
       var dj;
-      for (dj = 0; dj < dnm.length; dj++) deleteMcpTool(dnm[dj]);
+      for (dj = 0; dj < dnm.length; dj++) {
+        var tn = dnm[dj];
+        var hh = hbDel[tn] || location.hostname;
+        deleteMcpToolFromHost(hh, tn);
+      }
       state.selectedMcpToolNames = {};
       chrome.runtime.sendMessage({ type: 'MCP_SYNC_TOOLS' });
       patchMcpToolListSection(mcpContent);
@@ -874,15 +1076,18 @@ function downloadMcpPkgWithFilename(pkg, filenameBase) {
 function getSelectedMcpToolNamesOrdered() {
   var outArr = [];
   var sm = state.selectedMcpToolNames || {};
+  var tm = getMcpListToolsMap();
   var nm;
-  for (nm in state.mcpTools || {}) {
-    if (!(state.mcpTools || {}).hasOwnProperty(nm)) continue;
+  for (nm in tm) {
+    if (!Object.prototype.hasOwnProperty.call(tm, nm)) continue;
     if (sm[nm]) outArr.push(nm);
   }
   return outArr;
 }
 function openMcpToolEditor(toolName) {
-  var tool = state.mcpTools[toolName];
+  var editingHost = resolveMcpToolHostFromView(toolName);
+  var toolsObj = loadToolsObjectForHostname(editingHost);
+  var tool = toolsObj[toolName];
   if (!tool) return;
 
   var overlay = document.createElement('div');
@@ -957,9 +1162,9 @@ function openMcpToolEditor(toolName) {
     tool.enabled = newEnabled;
 
     if (newName && newName !== toolName) {
-      delete state.mcpTools[toolName];
+      delete toolsObj[toolName];
       tool.name = newName;
-      state.mcpTools[newName] = tool;
+      toolsObj[newName] = tool;
     }
 
     var propDescInputs = modal.querySelectorAll('.ai-req-mcp-editor-prop-desc');
@@ -986,7 +1191,7 @@ function openMcpToolEditor(toolName) {
       tool.inputSchema.required = newRequired;
     }
 
-    saveMcpTools();
+    persistToolsObjectForHostname(editingHost, toolsObj);
     chrome.runtime.sendMessage({ type: 'MCP_SYNC_TOOLS' });
     overlay.remove();
     refreshMainPanelContent();
@@ -1016,7 +1221,9 @@ function openMcpToolEditor(toolName) {
 }
 
 function openMcpToolTester(toolName) {
-  var tool = state.mcpTools[toolName];
+  var testerHost = resolveMcpToolHostFromView(toolName);
+  var toolsObjTester = loadToolsObjectForHostname(testerHost);
+  var tool = toolsObjTester[toolName];
   if (!tool) return;
 
   var overlay = document.createElement('div');

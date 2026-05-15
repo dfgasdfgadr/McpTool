@@ -114,12 +114,14 @@ var state = {
   selectedReqIds: {},
   selectedMcpToolNames: {},
   mcpUseEnhancedGeneration: false,
+  mcpViewDataset: null,
   mcpListUi: {
     keyword: '',
     groupMode: 'none',
     filterEnabled: 'all',
     riskLevels: {},
-    toolbarCollapsed: false
+    toolbarCollapsed: false,
+    siteFilter: 'all'
   }
 };
 

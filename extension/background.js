@@ -167,6 +167,70 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
     return true;
   }
 
+  if (message.type === 'MCP_GET_TOOLS_VIEW') {
+    var siteFilterMv = message.siteFilter || 'all';
+    var tabHostnameMv = message.currentTabHostname || '';
+    chrome.storage.local.get(null, function (items) {
+      var pack = mergeAllMcpToolsFromStorage(items);
+      var merged = pack.merged;
+      var mergedToolCount = Object.keys(merged).length;
+      var mergedEnabledCount = 0;
+      var mk;
+      for (mk in merged) {
+        if (!Object.prototype.hasOwnProperty.call(merged, mk)) continue;
+        if (merged[mk].enabled !== false) mergedEnabledCount++;
+      }
+      var toolsOut;
+      var hostByToolOut;
+      if (siteFilterMv === 'all') {
+        toolsOut = merged;
+        hostByToolOut = pack.hostByTool;
+      } else if (siteFilterMv === '__exclude_current__') {
+        toolsOut = {};
+        hostByToolOut = {};
+        for (mk in merged) {
+          if (!Object.prototype.hasOwnProperty.call(merged, mk)) continue;
+          if (tabHostnameMv && pack.hostByTool[mk] === tabHostnameMv) continue;
+          toolsOut[mk] = merged[mk];
+          hostByToolOut[mk] = pack.hostByTool[mk];
+        }
+      } else {
+        var siteKey = 'ai_req_mcp_tools_' + siteFilterMv;
+        toolsOut = parseStoredTools(items[siteKey]);
+        if (!toolsOut || typeof toolsOut !== 'object') toolsOut = {};
+        hostByToolOut = {};
+        var tk;
+        for (tk in toolsOut) {
+          if (Object.prototype.hasOwnProperty.call(toolsOut, tk)) {
+            hostByToolOut[tk] = siteFilterMv;
+          }
+        }
+      }
+      var excludeCurrentRemainCount = mergedToolCount;
+      if (tabHostnameMv && pack.hostByTool) {
+        excludeCurrentRemainCount = 0;
+        for (mk in merged) {
+          if (!Object.prototype.hasOwnProperty.call(merged, mk)) continue;
+          if (pack.hostByTool[mk] === tabHostnameMv) continue;
+          excludeCurrentRemainCount++;
+        }
+      }
+      sendResponse({
+        ok: true,
+        siteFilter: siteFilterMv,
+        tools: toolsOut,
+        hostByTool: hostByToolOut,
+        hosts: pack.hosts,
+        hostToolCounts: pack.hostToolCounts || {},
+        mergedToolCount: mergedToolCount,
+        mergedEnabledCount: mergedEnabledCount,
+        excludeCurrentRemainCount: excludeCurrentRemainCount,
+        currentTabHostname: tabHostnameMv
+      });
+    });
+    return true;
+  }
+
   if (message.type === 'MCP_GET_STATUS') {
     sendResponse({
       helperConnected: mcpState.helperConnected,
@@ -447,6 +511,41 @@ function parseStoredTools(toolsVal) {
   }
   if (typeof toolsVal === 'object') return toolsVal;
   return null;
+}
+
+/** 与 syncToolsToHelper 相同的合并顺序（storage key 遍历顺序后者覆盖同名工具） */
+function mergeAllMcpToolsFromStorage(items) {
+  var allTools = {};
+  var hostByTool = {};
+  var hostsObj = {};
+  var hostToolCounts = {};
+  var storageKeys = Object.keys(items || {});
+  var ki;
+  for (ki = 0; ki < storageKeys.length; ki++) {
+    var key = storageKeys[ki];
+    if (key.indexOf('ai_req_mcp_tools_') !== 0) continue;
+    var hostname = key.substring('ai_req_mcp_tools_'.length);
+    hostsObj[hostname] = true;
+    var toolsObj = parseStoredTools(items[key]);
+    if (!toolsObj || typeof toolsObj !== 'object') {
+      hostToolCounts[hostname] = 0;
+      continue;
+    }
+    hostToolCounts[hostname] = Object.keys(toolsObj).length;
+    var tKeys = Object.keys(toolsObj);
+    var ti;
+    for (ti = 0; ti < tKeys.length; ti++) {
+      var tn = tKeys[ti];
+      allTools[tn] = toolsObj[tn];
+      hostByTool[tn] = hostname;
+    }
+  }
+  return {
+    merged: allTools,
+    hostByTool: hostByTool,
+    hosts: Object.keys(hostsObj).sort(),
+    hostToolCounts: hostToolCounts
+  };
 }
 
 function connectMcpHelper() {
@@ -791,18 +890,8 @@ function handleMcpToolCall(callId, toolName, toolArguments) {
 function syncToolsToHelper() {
   if (!mcpState.helperPort) return;
   chrome.storage.local.get(null, function (items) {
-    var allTools = {};
-    var storageKeys = Object.keys(items);
-    for (var ki = 0; ki < storageKeys.length; ki++) {
-      var key = storageKeys[ki];
-      if (key.indexOf('ai_req_mcp_tools_') !== 0) continue;
-      var toolsObj = parseStoredTools(items[key]);
-      if (!toolsObj || typeof toolsObj !== 'object') continue;
-      var tKeys = Object.keys(toolsObj);
-      for (var ti = 0; ti < tKeys.length; ti++) {
-        allTools[tKeys[ti]] = toolsObj[tKeys[ti]];
-      }
-    }
+    var pack = mergeAllMcpToolsFromStorage(items);
+    var allTools = pack.merged;
     try {
       mcpState.helperPort.postMessage({ type: 'SYNC_TOOLS', tools: allTools });
       console.log('[AI_REQ_ANALYZER] synced tools to helper:', Object.keys(allTools).length);

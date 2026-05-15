@@ -614,8 +614,8 @@ function mergeGeneratedMcpToolsIntoState(toolsArray) {
   return { added: added, skipped: skipped };
 }
 
-function removeDuplicateMcpToolsByConflictKey() {
-  var mtools = state.mcpTools;
+function removeDuplicateMcpToolsByConflictKeyForHostname(hostname) {
+  var mtools = loadToolsObjectForHostname(hostname);
   if (!mtools || typeof mtools !== 'object') return 0;
   var groups = Object.create(null);
   var nm;
@@ -641,8 +641,12 @@ function removeDuplicateMcpToolsByConflictKey() {
       removed++;
     }
   }
-  if (removed) saveMcpTools();
+  if (removed) persistToolsObjectForHostname(hostname, mtools);
   return removed;
+}
+
+function removeDuplicateMcpToolsByConflictKey() {
+  return removeDuplicateMcpToolsByConflictKeyForHostname(location.hostname);
 }
 
 function generateMcpToolFromRecord(req) {
@@ -1006,6 +1010,42 @@ function pickGeneratorForRequests() {
 
 var MCP_TOOLS_KEY_PREFIX = 'ai_req_mcp_tools_';
 
+function loadToolsObjectForHostname(hostname) {
+  var key = MCP_TOOLS_KEY_PREFIX + hostname;
+  try {
+    var saved = storageGet(key, null);
+    if (saved) return JSON.parse(saved);
+  } catch (e) {}
+  return {};
+}
+
+function persistToolsObjectForHostname(hostname, toolsObj) {
+  var key = MCP_TOOLS_KEY_PREFIX + hostname;
+  storageSet(key, JSON.stringify(toolsObj));
+  if (hostname === location.hostname) {
+    state.mcpTools = toolsObj;
+  }
+}
+
+function deleteMcpToolFromHost(hostname, toolName) {
+  var toolsObj = loadToolsObjectForHostname(hostname);
+  if (!toolsObj || !Object.prototype.hasOwnProperty.call(toolsObj, toolName)) return false;
+  delete toolsObj[toolName];
+  if (state.selectedMcpToolNames && state.selectedMcpToolNames[toolName]) {
+    delete state.selectedMcpToolNames[toolName];
+  }
+  persistToolsObjectForHostname(hostname, toolsObj);
+  return true;
+}
+
+function setMcpToolEnabledOnHost(hostname, toolName, enabled) {
+  var toolsObj = loadToolsObjectForHostname(hostname);
+  if (!toolsObj[toolName]) return false;
+  toolsObj[toolName].enabled = enabled;
+  persistToolsObjectForHostname(hostname, toolsObj);
+  return true;
+}
+
 function saveMcpTools() {
   var key = MCP_TOOLS_KEY_PREFIX + location.hostname;
   storageSet(key, JSON.stringify(state.mcpTools));
@@ -1022,13 +1062,7 @@ function loadMcpTools() {
 }
 
 function deleteMcpTool(toolName) {
-  if (state.mcpTools && state.mcpTools.hasOwnProperty(toolName)) {
-    delete state.mcpTools[toolName];
-    if (state.selectedMcpToolNames && state.selectedMcpToolNames[toolName]) {
-      delete state.selectedMcpToolNames[toolName];
-    }
-    saveMcpTools();
-  }
+  deleteMcpToolFromHost(location.hostname, toolName);
 }
 
 /** 导出工具携带的 X-Csrf-Token 易过期；同源 GET /projex 由页面 Cookie 校验时，错误 Token 会导致业务 400。优先剥离过时 Token，再从页面 DOM 补当前会话 Token。 */
