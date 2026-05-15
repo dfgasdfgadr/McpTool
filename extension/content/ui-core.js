@@ -76,10 +76,64 @@ function toggleMainPanel() {
   state.isPanelOpen = !state.isPanelOpen;
   if (state.isPanelOpen) {
     state.mainPanel.style.display = 'flex';
-    refreshRequestList();
+    refreshMainWorkbench();
   } else {
     state.mainPanel.style.display = 'none';
   }
+}
+
+function ensureMainUiState() {
+  if (!state.ui || typeof state.ui !== 'object') state.ui = {};
+  if (!state.ui.activeMainTab) state.ui.activeMainTab = 'requests';
+  if (typeof state.ui.requestKeyword !== 'string') state.ui.requestKeyword = '';
+}
+
+function setMainWorkbenchTab(tabName) {
+  ensureMainUiState();
+  state.ui.activeMainTab = tabName || 'requests';
+  if (state.mainPanel) {
+    state.mainPanel.setAttribute('data-ai-req-tab', state.ui.activeMainTab);
+  }
+  refreshMainWorkbench();
+}
+
+function refreshMainTabButtons() {
+  if (!state.mainPanel) return;
+  ensureMainUiState();
+  var tabs = state.mainPanel.querySelectorAll('.ai-req-main-tab');
+  for (var i = 0; i < tabs.length; i++) {
+    var active = tabs[i].getAttribute('data-main-tab') === state.ui.activeMainTab;
+    tabs[i].classList.toggle('ai-req-main-tab-active', active);
+    tabs[i].setAttribute('aria-selected', active ? 'true' : 'false');
+  }
+}
+
+function refreshMainWorkbench() {
+  if (!state.mainPanel) return;
+  ensureMainUiState();
+  state.mainPanel.setAttribute('data-ai-req-tab', state.ui.activeMainTab);
+  refreshMainTabButtons();
+  if (state.ui.activeMainTab === 'requests') {
+    refreshRequestList(undefined, true);
+  } else if (state.ui.activeMainTab === 'mcp') {
+    if (!state.mcpPanelTab) state.mcpPanelTab = 'list';
+    refreshMainPanelContent();
+  } else if (state.ui.activeMainTab === 'settings') {
+    hydrateSettingsWorkbench();
+  }
+}
+
+function createMainTabButton(tabName, label) {
+  var btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'ai-req-main-tab';
+  btn.setAttribute('data-main-tab', tabName);
+  btn.setAttribute('role', 'tab');
+  btn.textContent = label;
+  btn.addEventListener('click', function () {
+    setMainWorkbenchTab(tabName);
+  });
+  return btn;
 }
 
 function createMainPanel() {
@@ -108,30 +162,13 @@ function createMainPanel() {
   title.className = 'ai-req-panel-title';
   title.textContent = 'AI请求分析助手';
 
-  var mcpTabBtn = document.createElement('button');
-  mcpTabBtn.className = 'ai-req-panel-btn ai-req-mcp-tab-btn';
-  mcpTabBtn.textContent = 'MCP \u5DE5\u5177';
-  mcpTabBtn.title = 'MCP \u5DE5\u5177\u7BA1\u7406';
-  mcpTabBtn.addEventListener('click', function (e) {
-    e.stopPropagation();
-    var wasOpen =
-      state.mcpPanelTab === 'list' || state.mcpPanelTab === 'logs' || state.mcpPanelTab === 'localExports';
-    state.mcpPanelTab = wasOpen ? null : 'list';
-    if (state.mcpPanelTab) {
-      mcpTabBtn.classList.add('ai-req-mcp-tab-btn-active');
-    } else {
-      mcpTabBtn.classList.remove('ai-req-mcp-tab-btn-active');
-    }
-    refreshMainPanelContent();
-  });
-
   var configBtn = document.createElement('button');
   configBtn.className = 'ai-req-panel-btn';
   configBtn.textContent = '\u2699';
   configBtn.title = '配置';
   configBtn.addEventListener('click', function (e) {
     e.stopPropagation();
-    openConfigPanel();
+    setMainWorkbenchTab('settings');
   });
 
   var closeBtn = document.createElement('button');
@@ -145,9 +182,15 @@ function createMainPanel() {
   });
 
   header.appendChild(title);
-  header.appendChild(mcpTabBtn);
   header.appendChild(configBtn);
   header.appendChild(closeBtn);
+
+  var mainTabs = document.createElement('div');
+  mainTabs.className = 'ai-req-main-tabs';
+  mainTabs.setAttribute('role', 'tablist');
+  mainTabs.appendChild(createMainTabButton('requests', '\u8BF7\u6C42\u5DE5\u4F5C\u53F0'));
+  mainTabs.appendChild(createMainTabButton('mcp', 'MCP \u5DE5\u4F5C\u53F0'));
+  mainTabs.appendChild(createMainTabButton('settings', '\u8BBE\u7F6E'));
 
   var searchBox = document.createElement('div');
   searchBox.className = 'ai-req-search-box';
@@ -165,9 +208,12 @@ function createMainPanel() {
   searchInput.setAttribute('aria-label', '搜索请求URL或分析结果');
   searchInput.rows = 1;
   searchInput.placeholder = '搜索请求URL或分析结果...';
+  ensureMainUiState();
+  searchInput.value = state.ui.requestKeyword || '';
   searchInput.addEventListener('input', function () {
     searchInput.value = searchInput.value.replace(/[\r\n]+/g, '');
-    refreshRequestList(searchInput.value.trim(), false);
+    state.ui.requestKeyword = searchInput.value.trim();
+    refreshRequestList(state.ui.requestKeyword, false);
   });
   searchInput.addEventListener('keydown', function (e) {
     if (e.key === 'Enter') {
@@ -352,20 +398,124 @@ function createMainPanel() {
   bottomInput.appendChild(chatInput);
   bottomInput.appendChild(sendBtn);
 
+  var requestPane = document.createElement('div');
+  requestPane.className = 'ai-req-workbench ai-req-request-workbench';
+  requestPane.setAttribute('data-workbench', 'requests');
+  requestPane.appendChild(searchBox);
+  requestPane.appendChild(filterBar);
+  requestPane.appendChild(actionBar);
+  requestPane.appendChild(progressBar);
+  requestPane.appendChild(mainBody);
+  requestPane.appendChild(bottomInput);
+
+  var mcpPane = document.createElement('div');
+  mcpPane.className = 'ai-req-workbench ai-req-mcp-workbench';
+  mcpPane.setAttribute('data-workbench', 'mcp');
+  var mcpBody = document.createElement('div');
+  mcpBody.className = 'ai-req-mcp-body';
+  mcpPane.appendChild(mcpBody);
+
+  var settingsPane = document.createElement('div');
+  settingsPane.className = 'ai-req-workbench ai-req-settings-workbench';
+  settingsPane.setAttribute('data-workbench', 'settings');
+  settingsPane.innerHTML = '' +
+    '<div class="ai-req-settings-scroll">' +
+    '  <div class="ai-req-settings-section">' +
+    '    <div class="ai-req-settings-title">AI 配置</div>' +
+    '    <label class="ai-req-settings-field"><span>API Key</span><input type="password" class="ai-req-settings-input ai-req-settings-apikey" placeholder="输入 API Key"></label>' +
+    '    <label class="ai-req-settings-field"><span>Base URL</span><input type="text" class="ai-req-settings-input ai-req-settings-baseurl" placeholder="https://api.moonshot.cn/v1"></label>' +
+    '    <label class="ai-req-settings-field"><span>模型名称</span><input type="text" class="ai-req-settings-input ai-req-settings-model" placeholder="kimi-k2.6"></label>' +
+    '  </div>' +
+    '  <div class="ai-req-settings-section">' +
+    '    <div class="ai-req-settings-title">MCP Server 配置</div>' +
+    '    <label class="ai-req-settings-field"><span>MCP 端口</span><input type="number" min="1" max="65535" class="ai-req-settings-input ai-req-settings-mcp-port" placeholder="9527"></label>' +
+    '    <label class="ai-req-settings-field"><span>鉴权 Token</span><input type="password" class="ai-req-settings-input ai-req-settings-mcp-token" placeholder="可选，用于 MCP 连接鉴权"></label>' +
+    '    <label class="ai-req-settings-field"><span>MCP 工具命名</span><select class="ai-req-settings-input ai-req-settings-mcp-tool-naming"><option value="full">完整路径（默认）</option><option value="compact">紧凑（末段+哈希）</option></select></label>' +
+    '    <label class="ai-req-settings-check"><input type="checkbox" class="ai-req-settings-mcp-auto-sync"> 启动时自动同步工具列表</label>' +
+    '    <label class="ai-req-settings-field"><span>MCP 导出目录（本机）</span><input type="text" class="ai-req-settings-input ai-req-settings-mcp-export-path" placeholder="D:\\\\exports\\\\mcp 或 /home/user/mcp-export"></label>' +
+    '    <div class="ai-req-settings-hint">导出目录非空且 MCP 助手已启动时，会优先写入本机目录；否则使用浏览器下载。</div>' +
+    '  </div>' +
+    '</div>' +
+    '<div class="ai-req-settings-actions">' +
+    '  <button type="button" class="ai-req-btn ai-req-btn-secondary ai-req-settings-open-legacy">打开浮层配置</button>' +
+    '  <button type="button" class="ai-req-btn ai-req-btn-primary ai-req-settings-save">保存设置</button>' +
+    '</div>';
+
   panel.appendChild(header);
-  panel.appendChild(searchBox);
-  panel.appendChild(filterBar);
-  panel.appendChild(actionBar);
-  panel.appendChild(progressBar);
-  panel.appendChild(mainBody);
-  panel.appendChild(bottomInput);
+  panel.appendChild(mainTabs);
+  panel.appendChild(requestPane);
+  panel.appendChild(mcpPane);
+  panel.appendChild(settingsPane);
 
   makeDraggable(panel, header);
 
   safeAppendChild(panel);
   state.mainPanel = panel;
   wireReqFilterInteractionsOnce(panel);
+  bindSettingsWorkbench(panel);
   refreshFilterChipHighlight();
+  refreshMainWorkbench();
+}
+
+function hydrateSettingsWorkbench() {
+  if (!state.mainPanel) return;
+  var panel = state.mainPanel;
+  var cfg = state.config || {};
+  function setVal(sel, val) {
+    var el = panel.querySelector(sel);
+    if (el) el.value = val == null ? '' : val;
+  }
+  function setChecked(sel, val) {
+    var el = panel.querySelector(sel);
+    if (el) el.checked = !!val;
+  }
+  setVal('.ai-req-settings-apikey', cfg.apiKey || '');
+  setVal('.ai-req-settings-baseurl', cfg.baseURL || DEFAULT_CONFIG.baseURL);
+  setVal('.ai-req-settings-model', cfg.model || DEFAULT_CONFIG.model);
+  setVal('.ai-req-settings-mcp-port', cfg.mcpPort || 9527);
+  setVal('.ai-req-settings-mcp-token', cfg.mcpToken || '');
+  setVal('.ai-req-settings-mcp-tool-naming', cfg.mcpToolNaming === 'compact' ? 'compact' : 'full');
+  setChecked('.ai-req-settings-mcp-auto-sync', !!cfg.mcpAutoSync);
+  setVal('.ai-req-settings-mcp-export-path', cfg.mcpExportPath || '');
+}
+
+function saveSettingsWorkbench(panel) {
+  var root = panel || state.mainPanel;
+  if (!root) return;
+  function val(sel) {
+    var el = root.querySelector(sel);
+    return el ? el.value.trim() : '';
+  }
+  function checked(sel) {
+    var el = root.querySelector(sel);
+    return !!(el && el.checked);
+  }
+  state.config.apiKey = val('.ai-req-settings-apikey');
+  state.config.baseURL = val('.ai-req-settings-baseurl') || DEFAULT_CONFIG.baseURL;
+  state.config.model = val('.ai-req-settings-model') || DEFAULT_CONFIG.model;
+  var portVal = parseInt(val('.ai-req-settings-mcp-port'), 10);
+  state.config.mcpPort = (portVal > 0 && portVal <= 65535) ? portVal : 9527;
+  state.config.mcpToken = val('.ai-req-settings-mcp-token');
+  state.config.mcpToolNaming = val('.ai-req-settings-mcp-tool-naming') === 'compact' ? 'compact' : 'full';
+  state.config.mcpAutoSync = checked('.ai-req-settings-mcp-auto-sync');
+  state.config.mcpExportPath = val('.ai-req-settings-mcp-export-path');
+  saveConfig();
+  showToast('设置已保存');
+}
+
+function bindSettingsWorkbench(panel) {
+  var saveBtn = panel.querySelector('.ai-req-settings-save');
+  if (saveBtn) {
+    saveBtn.addEventListener('click', function () {
+      saveSettingsWorkbench(panel);
+    });
+  }
+  var legacyBtn = panel.querySelector('.ai-req-settings-open-legacy');
+  if (legacyBtn) {
+    legacyBtn.addEventListener('click', function () {
+      openConfigPanel();
+    });
+  }
 }
 
 function makeDraggable(element, handle) {
@@ -415,6 +565,8 @@ function makeDraggable(element, handle) {
 }
 
 function getActiveListKeyword() {
+  ensureMainUiState();
+  if (typeof state.ui.requestKeyword === 'string') return state.ui.requestKeyword.trim();
   var kw = '';
   if (state.mainPanel) {
     var si = state.mainPanel.querySelector('.ai-req-search-input');
@@ -851,10 +1003,17 @@ function appendRequestRowToList(listElInner, req, kwEffective) {
 
 function refreshRequestList(keyword, skipPruneSel) {
   if (!state.mainPanel) return;
+  ensureMainUiState();
   var kwEffective = typeof keyword === 'undefined' ? getActiveListKeyword() : keyword;
+  state.ui.requestKeyword = (kwEffective || '').trim();
+  var searchInput = state.mainPanel.querySelector('.ai-req-search-input');
+  if (searchInput && searchInput.value.trim() !== state.ui.requestKeyword) {
+    searchInput.value = state.ui.requestKeyword;
+  }
 
   var listEl = state.mainPanel.querySelector('.ai-req-request-list');
   var countEl = state.mainPanel.querySelector('.ai-req-req-count');
+  if (!listEl || !countEl) return;
   listEl.innerHTML = '';
 
   var filtered = filterRequestRecords(state.requestRecords, kwEffective);

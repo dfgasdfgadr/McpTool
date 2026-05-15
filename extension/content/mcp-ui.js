@@ -262,65 +262,59 @@ function patchMcpToolListSection(mcpContent) {
 }
 
 function bindMcpToolListRowEvents(mcpContent) {
-  var enabledChecks = mcpContent.querySelectorAll('.ai-req-mcp-tool-enabled');
-  var ei;
-  for (ei = 0; ei < enabledChecks.length; ei++) {
-    enabledChecks[ei].addEventListener('change', function () {
-      var tName = this.getAttribute('data-tool-name');
+  var listEl = mcpContent.querySelector('.ai-req-mcp-tool-list');
+  if (!listEl || listEl._aiReqMcpRowsDelegated) return;
+  listEl._aiReqMcpRowsDelegated = true;
+
+  listEl.addEventListener('change', function (ev) {
+    var target = ev.target;
+    if (!target || !target.classList) return;
+    if (target.classList.contains('ai-req-mcp-tool-enabled')) {
+      var tName = target.getAttribute('data-tool-name');
       var host = resolveMcpToolHostFromView(tName);
-      if (setMcpToolEnabledOnHost(host, tName, this.checked)) {
+      if (setMcpToolEnabledOnHost(host, tName, target.checked)) {
         chrome.runtime.sendMessage({ type: 'MCP_SYNC_TOOLS' });
         if (state.mcpPanelTab === 'list') patchMcpToolListSection(mcpContent);
       }
-    });
-  }
+      return;
+    }
+    if (target.classList.contains('ai-req-mcp-tool-pick')) {
+      ev.stopPropagation();
+      var pnm = target.getAttribute('data-tool-name');
+      if (!state.selectedMcpToolNames) state.selectedMcpToolNames = {};
+      if (target.checked) state.selectedMcpToolNames[pnm] = true;
+      else delete state.selectedMcpToolNames[pnm];
+    }
+  });
 
-  var editBtns = mcpContent.querySelectorAll('.ai-req-mcp-tool-edit-btn');
-  for (var ebi = 0; ebi < editBtns.length; ebi++) {
-    editBtns[ebi].addEventListener('click', function () {
-      openMcpToolEditor(this.getAttribute('data-tool-name'));
-    });
-  }
-
-  var testBtns = mcpContent.querySelectorAll('.ai-req-mcp-tool-test-btn');
-  for (var tbi = 0; tbi < testBtns.length; tbi++) {
-    testBtns[tbi].addEventListener('click', function () {
-      openMcpToolTester(this.getAttribute('data-tool-name'));
-    });
-  }
-
-  var deleteBtns = mcpContent.querySelectorAll('.ai-req-mcp-tool-delete-btn');
-  for (var di = 0; di < deleteBtns.length; di++) {
-    deleteBtns[di].addEventListener('click', function () {
-      var dName = this.getAttribute('data-tool-name');
-      if (confirm('\u786E\u5B9A\u5220\u9664\u5DE5\u5177 "' + dName + '"\uFF1F')) {
-        deleteMcpToolFromHost(resolveMcpToolHostFromView(dName), dName);
+  listEl.addEventListener('click', function (ev) {
+    var btn = ev.target && ev.target.closest ? ev.target.closest('button[data-tool-name]') : null;
+    if (!btn) return;
+    var toolName = btn.getAttribute('data-tool-name');
+    if (btn.classList.contains('ai-req-mcp-tool-edit-btn')) {
+      openMcpToolEditor(toolName);
+      return;
+    }
+    if (btn.classList.contains('ai-req-mcp-tool-test-btn')) {
+      openMcpToolTester(toolName);
+      return;
+    }
+    if (btn.classList.contains('ai-req-mcp-tool-delete-btn')) {
+      if (confirm('\u786E\u5B9A\u5220\u9664\u5DE5\u5177 "' + toolName + '"\uFF1F')) {
+        deleteMcpToolFromHost(resolveMcpToolHostFromView(toolName), toolName);
         chrome.runtime.sendMessage({ type: 'MCP_SYNC_TOOLS' });
         patchMcpToolListSection(mcpContent);
-        showToast('\u5DF2\u5220\u9664: ' + dName);
+        showToast('\u5DF2\u5220\u9664: ' + toolName);
       }
-    });
-  }
-
-  var pickBoxes = mcpContent.querySelectorAll('.ai-req-mcp-tool-pick');
-  for (var pi = 0; pi < pickBoxes.length; pi++) {
-    pickBoxes[pi].addEventListener('change', function (evPk) {
-      evPk.stopPropagation();
-      var pnm = this.getAttribute('data-tool-name');
-      if (!state.selectedMcpToolNames) state.selectedMcpToolNames = {};
-      if (this.checked) state.selectedMcpToolNames[pnm] = true;
-      else delete state.selectedMcpToolNames[pnm];
-    });
-  }
+    }
+  });
 }
 
 function refreshMainPanelContent() {
-  var bodyEl = state.mainPanel.querySelector('.ai-req-main-body');
+  var bodyEl = state.mainPanel.querySelector('.ai-req-mcp-body');
   if (!bodyEl) return;
 
   if (state.mcpPanelTab === 'list' || state.mcpPanelTab === 'logs' || state.mcpPanelTab === 'localExports') {
-    var reqList = bodyEl.querySelector('.ai-req-request-list');
-    if (reqList) reqList.style.display = 'none';
     var oldMcp = bodyEl.querySelector('.ai-req-mcp-content');
     if (oldMcp) oldMcp.remove();
     var mcpContent = document.createElement('div');
@@ -335,8 +329,6 @@ function refreshMainPanelContent() {
     bodyEl.appendChild(mcpContent);
     bindMcpContentEvents(mcpContent);
   } else {
-    var reqList2 = bodyEl.querySelector('.ai-req-request-list');
-    if (reqList2) reqList2.style.display = '';
     var mcpContent2 = bodyEl.querySelector('.ai-req-mcp-content');
     if (mcpContent2) mcpContent2.remove();
   }

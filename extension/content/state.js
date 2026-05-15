@@ -100,6 +100,10 @@ var state = {
   analyzeProgress: { total: 0, done: 0 },
   selectedReqId: null,
   selectedRewriteReqId: null,
+  ui: {
+    activeMainTab: 'requests',
+    requestKeyword: ''
+  },
   uiReady: false,
   menuReady: false,
   mcpTools: {},
