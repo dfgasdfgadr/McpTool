@@ -1,0 +1,568 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI 请求分析助手插件重设计方向</title>
+  <style>
+    :root {
+      --bg: #090b12;
+      --panel: #111520;
+      --panel-2: #171c2a;
+      --line: rgba(255,255,255,0.1);
+      --muted: #8b93a7;
+      --text: #eef3ff;
+      --blue: #6ea8ff;
+      --violet: #8d7cff;
+      --green: #46d39a;
+      --amber: #f5b85b;
+      --red: #ff6b7a;
+      --radius: 22px;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background:
+        radial-gradient(circle at 15% 10%, rgba(109, 92, 255, 0.25), transparent 30%),
+        radial-gradient(circle at 85% 0%, rgba(70, 211, 154, 0.12), transparent 26%),
+        linear-gradient(135deg, #070912, #0d111c 60%, #070912);
+      color: var(--text);
+      font-family: "Geist", "Satoshi", "Segoe UI", Arial, sans-serif;
+      padding: 40px;
+    }
+    .page {
+      max-width: 1440px;
+      margin: 0 auto;
+    }
+    .hero {
+      display: grid;
+      grid-template-columns: minmax(0, 1.1fr) minmax(360px, 0.9fr);
+      gap: 28px;
+      align-items: end;
+      margin-bottom: 34px;
+    }
+    h1 {
+      margin: 0;
+      font-size: clamp(42px, 5vw, 76px);
+      line-height: 0.96;
+      letter-spacing: -0.06em;
+      max-width: 980px;
+    }
+    .lead {
+      margin: 22px 0 0;
+      max-width: 760px;
+      color: var(--muted);
+      font-size: 18px;
+      line-height: 1.7;
+    }
+    .brief-card {
+      padding: 22px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: rgba(255,255,255,0.055);
+      backdrop-filter: blur(20px);
+      box-shadow: 0 24px 80px rgba(0,0,0,0.35);
+    }
+    .brief-card h2 {
+      margin: 0 0 14px;
+      font-size: 14px;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: #c8d4ff;
+    }
+    .brief-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 10px;
+    }
+    .metric {
+      min-height: 82px;
+      padding: 14px;
+      border-radius: 16px;
+      background: rgba(255,255,255,0.055);
+      border: 1px solid rgba(255,255,255,0.08);
+    }
+    .metric b {
+      display: block;
+      font-size: 24px;
+      margin-bottom: 8px;
+    }
+    .metric span {
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .options {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 20px;
+      align-items: stretch;
+    }
+    .option {
+      border: 1px solid var(--line);
+      border-radius: 28px;
+      overflow: hidden;
+      background: rgba(255,255,255,0.045);
+      box-shadow: 0 30px 80px rgba(0,0,0,0.28);
+    }
+    .option.recommended {
+      border-color: rgba(110,168,255,0.55);
+      box-shadow: 0 30px 120px rgba(73,112,255,0.28);
+    }
+    .option-head {
+      padding: 18px 20px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid var(--line);
+    }
+    .option-title {
+      font-size: 18px;
+      font-weight: 800;
+      letter-spacing: -0.03em;
+    }
+    .badge {
+      font-size: 11px;
+      color: #d9e7ff;
+      border: 1px solid rgba(110,168,255,0.35);
+      background: rgba(110,168,255,0.12);
+      padding: 5px 9px;
+      border-radius: 999px;
+    }
+    .mock {
+      padding: 16px;
+      background: #080a10;
+    }
+    .panel {
+      height: 430px;
+      border-radius: 20px;
+      background: var(--panel);
+      border: 1px solid rgba(255,255,255,0.1);
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+    .topbar {
+      height: 48px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 0 14px;
+      border-bottom: 1px solid rgba(255,255,255,0.08);
+      background: rgba(255,255,255,0.035);
+    }
+    .brand-dot {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, var(--blue), var(--violet));
+      box-shadow: 0 0 18px rgba(110,168,255,0.8);
+    }
+    .tabs {
+      margin-left: auto;
+      display: flex;
+      gap: 6px;
+    }
+    .tab {
+      height: 26px;
+      padding: 0 10px;
+      border-radius: 999px;
+      background: rgba(255,255,255,0.06);
+      color: #aab3c7;
+      font-size: 10px;
+      display: inline-flex;
+      align-items: center;
+    }
+    .tab.active {
+      background: rgba(110,168,255,0.18);
+      color: #d7e7ff;
+    }
+    .workspace {
+      flex: 1;
+      display: grid;
+      grid-template-columns: 78px minmax(0, 1fr);
+      min-height: 0;
+    }
+    .rail {
+      border-right: 1px solid rgba(255,255,255,0.08);
+      padding: 12px 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      background: rgba(0,0,0,0.18);
+    }
+    .rail-item {
+      height: 52px;
+      border-radius: 14px;
+      background: rgba(255,255,255,0.05);
+      color: #9aa3b9;
+      font-size: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      padding: 6px;
+    }
+    .rail-item.active {
+      background: rgba(110,168,255,0.18);
+      color: #e7f0ff;
+    }
+    .main {
+      min-width: 0;
+      display: grid;
+      grid-template-rows: auto 1fr;
+    }
+    .summary {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 8px;
+      padding: 12px;
+      border-bottom: 1px solid rgba(255,255,255,0.08);
+    }
+    .summary-card {
+      padding: 10px;
+      min-height: 56px;
+      border-radius: 14px;
+      background: rgba(255,255,255,0.055);
+    }
+    .summary-card strong {
+      display: block;
+      font-size: 18px;
+    }
+    .summary-card span {
+      color: var(--muted);
+      font-size: 10px;
+    }
+    .content {
+      min-height: 0;
+      display: grid;
+      grid-template-columns: 1fr 0.86fr;
+      gap: 10px;
+      padding: 12px;
+    }
+    .list,
+    .detail {
+      min-width: 0;
+      border-radius: 16px;
+      background: rgba(255,255,255,0.045);
+      border: 1px solid rgba(255,255,255,0.08);
+      overflow: hidden;
+    }
+    .toolbar {
+      height: 44px;
+      display: flex;
+      gap: 6px;
+      align-items: center;
+      padding: 8px;
+      border-bottom: 1px solid rgba(255,255,255,0.08);
+    }
+    .search {
+      flex: 1;
+      height: 26px;
+      border-radius: 999px;
+      background: rgba(255,255,255,0.08);
+    }
+    .chip {
+      width: 44px;
+      height: 24px;
+      border-radius: 999px;
+      background: rgba(110,168,255,0.16);
+    }
+    .row {
+      height: 42px;
+      margin: 8px;
+      border-radius: 12px;
+      background: rgba(255,255,255,0.055);
+      display: grid;
+      grid-template-columns: 52px 1fr 38px;
+      align-items: center;
+      gap: 8px;
+      padding: 0 8px;
+    }
+    .method {
+      height: 22px;
+      border-radius: 999px;
+      background: rgba(70,211,154,0.16);
+    }
+    .url {
+      height: 10px;
+      border-radius: 999px;
+      background: rgba(255,255,255,0.16);
+    }
+    .status {
+      height: 18px;
+      border-radius: 8px;
+      background: rgba(70,211,154,0.28);
+    }
+    .detail-inner {
+      padding: 14px;
+    }
+    .detail-title {
+      width: 70%;
+      height: 16px;
+      border-radius: 999px;
+      background: rgba(255,255,255,0.18);
+      margin-bottom: 14px;
+    }
+    .code {
+      height: 150px;
+      border-radius: 14px;
+      background: #07090f;
+      border: 1px solid rgba(110,168,255,0.12);
+      margin-bottom: 12px;
+    }
+    .actions {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+    }
+    .action {
+      height: 34px;
+      border-radius: 12px;
+      background: rgba(110,168,255,0.18);
+    }
+    .glass .panel {
+      background:
+        radial-gradient(circle at 10% 0%, rgba(141,124,255,0.28), transparent 36%),
+        rgba(246,247,255,0.12);
+    }
+    .glass .workspace {
+      grid-template-columns: 1fr;
+    }
+    .glass .content {
+      grid-template-columns: 1fr;
+      grid-template-rows: 1fr 0.72fr;
+    }
+    .brutal .panel {
+      border-radius: 4px;
+      background: #0b0d0b;
+      border-color: rgba(70,211,154,0.38);
+    }
+    .brutal .topbar,
+    .brutal .rail,
+    .brutal .list,
+    .brutal .detail,
+    .brutal .summary-card,
+    .brutal .row {
+      border-radius: 2px;
+      background: rgba(70,211,154,0.05);
+      border-color: rgba(70,211,154,0.2);
+    }
+    .option-body {
+      padding: 20px;
+    }
+    .option-body p {
+      color: var(--muted);
+      line-height: 1.7;
+      margin: 0 0 16px;
+      font-size: 14px;
+    }
+    .bullets {
+      display: grid;
+      gap: 10px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+      color: #c8d0e3;
+      font-size: 13px;
+      line-height: 1.55;
+    }
+    .bullets li {
+      padding-left: 14px;
+      position: relative;
+    }
+    .bullets li::before {
+      content: "";
+      width: 5px;
+      height: 5px;
+      border-radius: 50%;
+      background: var(--blue);
+      position: absolute;
+      left: 0;
+      top: 8px;
+    }
+    .footer-note {
+      margin-top: 28px;
+      color: var(--muted);
+      line-height: 1.7;
+      max-width: 980px;
+    }
+    @media (max-width: 1100px) {
+      body { padding: 24px; }
+      .hero { grid-template-columns: 1fr; }
+      .options { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <section class="hero">
+      <div>
+        <h1>把插件从拥挤浮层升级为专业调试工作台</h1>
+        <p class="lead">目标不是做花哨落地页，而是把请求分析、Mock 改写、MCP 工具管理、设置配置整合成一个高密度但清晰的工作流界面。推荐方向是暗色专业控制台，并支持从窄浮层切换到宽屏工作台。</p>
+      </div>
+      <aside class="brief-card">
+        <h2>设计约束</h2>
+        <div class="brief-grid">
+          <div class="metric"><b>3</b><span>主工作区：请求、MCP、设置</span></div>
+          <div class="metric"><b>2</b><span>尺寸状态：浮层与宽屏工作台</span></div>
+          <div class="metric"><b>1</b><span>核心目标：效率优先</span></div>
+          <div class="metric"><b>0</b><span>避免新增重型框架依赖</span></div>
+        </div>
+      </aside>
+    </section>
+
+    <section class="options">
+      <article class="option recommended">
+        <div class="option-head">
+          <div class="option-title">A. 暗色控制台工作台</div>
+          <div class="badge">推荐</div>
+        </div>
+        <div class="mock">
+          <div class="panel">
+            <div class="topbar">
+              <div class="brand-dot"></div>
+              <strong>AI Request Command Center</strong>
+              <div class="tabs"><span class="tab active">请求</span><span class="tab">MCP</span><span class="tab">设置</span></div>
+            </div>
+            <div class="workspace">
+              <div class="rail">
+                <div class="rail-item active">概览</div>
+                <div class="rail-item">分析</div>
+                <div class="rail-item">Mock</div>
+                <div class="rail-item">工具</div>
+              </div>
+              <div class="main">
+                <div class="summary">
+                  <div class="summary-card"><strong>128</strong><span>请求</span></div>
+                  <div class="summary-card"><strong>42</strong><span>已分析</span></div>
+                  <div class="summary-card"><strong>12</strong><span>MCP 工具</span></div>
+                  <div class="summary-card"><strong>5</strong><span>Mock 规则</span></div>
+                </div>
+                <div class="content">
+                  <div class="list">
+                    <div class="toolbar"><div class="search"></div><div class="chip"></div></div>
+                    <div class="row"><div class="method"></div><div class="url"></div><div class="status"></div></div>
+                    <div class="row"><div class="method"></div><div class="url"></div><div class="status"></div></div>
+                    <div class="row"><div class="method"></div><div class="url"></div><div class="status"></div></div>
+                    <div class="row"><div class="method"></div><div class="url"></div><div class="status"></div></div>
+                  </div>
+                  <div class="detail">
+                    <div class="detail-inner">
+                      <div class="detail-title"></div>
+                      <div class="code"></div>
+                      <div class="actions"><div class="action"></div><div class="action"></div><div class="action"></div></div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="option-body">
+          <p>最适合“效率优先”。把浮层变成带左侧模式导航、顶部状态、列表与详情双栏的调试工作台。</p>
+          <ul class="bullets">
+            <li>宽屏模式下请求列表和详情并排，减少反复展开收起。</li>
+            <li>请求、MCP、设置共享同一套密度、状态、操作区语言。</li>
+            <li>视觉高级但克制，适合开发工具和演示截图。</li>
+          </ul>
+        </div>
+      </article>
+
+      <article class="option glass">
+        <div class="option-head">
+          <div class="option-title">B. 紫色玻璃工作台</div>
+          <div class="badge">品牌延续</div>
+        </div>
+        <div class="mock">
+          <div class="panel">
+            <div class="topbar">
+              <div class="brand-dot"></div>
+              <strong>AI 请求分析助手</strong>
+              <div class="tabs"><span class="tab active">请求</span><span class="tab">MCP</span><span class="tab">设置</span></div>
+            </div>
+            <div class="workspace">
+              <div class="main">
+                <div class="summary">
+                  <div class="summary-card"><strong>分析</strong><span>批量处理</span></div>
+                  <div class="summary-card"><strong>Mock</strong><span>规则生效</span></div>
+                  <div class="summary-card"><strong>MCP</strong><span>工具生成</span></div>
+                  <div class="summary-card"><strong>日志</strong><span>调用追踪</span></div>
+                </div>
+                <div class="content">
+                  <div class="list">
+                    <div class="toolbar"><div class="search"></div><div class="chip"></div></div>
+                    <div class="row"><div class="method"></div><div class="url"></div><div class="status"></div></div>
+                    <div class="row"><div class="method"></div><div class="url"></div><div class="status"></div></div>
+                    <div class="row"><div class="method"></div><div class="url"></div><div class="status"></div></div>
+                  </div>
+                  <div class="detail"><div class="detail-inner"><div class="detail-title"></div><div class="code"></div></div></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="option-body">
+          <p>保留当前紫色识别度，升级成更柔和的玻璃质感。适合想延续现有品牌但提升精致度。</p>
+          <ul class="bullets">
+            <li>迁移成本较低，用户熟悉感更强。</li>
+            <li>适合中等复杂度，但对超长列表不如暗色控制台耐看。</li>
+            <li>更偏产品化 SaaS，不如 A 方案“开发工具感”强。</li>
+          </ul>
+        </div>
+      </article>
+
+      <article class="option brutal">
+        <div class="option-head">
+          <div class="option-title">C. 工业终端风</div>
+          <div class="badge">激进</div>
+        </div>
+        <div class="mock">
+          <div class="panel">
+            <div class="topbar">
+              <div class="brand-dot"></div>
+              <strong>MCP TERMINAL</strong>
+              <div class="tabs"><span class="tab active">REQ</span><span class="tab">TOOLS</span><span class="tab">LOG</span></div>
+            </div>
+            <div class="workspace">
+              <div class="rail">
+                <div class="rail-item active">REQ</div>
+                <div class="rail-item">MAP</div>
+                <div class="rail-item">CALL</div>
+                <div class="rail-item">CFG</div>
+              </div>
+              <div class="main">
+                <div class="summary">
+                  <div class="summary-card"><strong>GET</strong><span>64</span></div>
+                  <div class="summary-card"><strong>POST</strong><span>21</span></div>
+                  <div class="summary-card"><strong>5XX</strong><span>2</span></div>
+                  <div class="summary-card"><strong>RISK</strong><span>high</span></div>
+                </div>
+                <div class="content">
+                  <div class="list">
+                    <div class="toolbar"><div class="search"></div><div class="chip"></div></div>
+                    <div class="row"><div class="method"></div><div class="url"></div><div class="status"></div></div>
+                    <div class="row"><div class="method"></div><div class="url"></div><div class="status"></div></div>
+                    <div class="row"><div class="method"></div><div class="url"></div><div class="status"></div></div>
+                  </div>
+                  <div class="detail"><div class="detail-inner"><div class="detail-title"></div><div class="code"></div><div class="actions"><div class="action"></div><div class="action"></div><div class="action"></div></div></div></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="option-body">
+          <p>最有个性，截图冲击力强，但学习成本也最高。适合把插件定位成极客工具。</p>
+          <ul class="bullets">
+            <li>强网格、低圆角、终端符号语言，记忆点最强。</li>
+            <li>中文信息密度高时容易显得压迫，需要克制使用。</li>
+            <li>如果目标是日常高频使用，建议只吸收其局部元素。</li>
+          </ul>
+        </div>
+      </article>
+    </section>
+
+    <p class="footer-note">我的产品建议：选择 A 作为主方向，吸收 C 的精密网格与状态编码，再保留少量紫色作为品牌强调色。下一步可以把 A 方案细化为三层结构：全局壳层、请求工作台、MCP 工作台。</p>
+  </main>
+</body>
+</html>
