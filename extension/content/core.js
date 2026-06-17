@@ -136,7 +136,60 @@ function computeRequestSignature(rec) {
   return method + '\n' + pathnameKey + '\n' + qfp + '\n' + bfp;
 }
 
+var FLOW_VOLATILE_QUERY_RE = /^(t|timestamp|ts|time|_t|nonce|random|r|cachebust|cb|_|token|requestid|reqid|sig|signature|uuid)$/i;
+
+function stableQueryFingerprintForFlow(urlStr) {
+  try {
+    var parsed = new URL(urlStr);
+    var keys = [];
+    parsed.searchParams.forEach(function (_, kk) {
+      if (keys.indexOf(kk) === -1) keys.push(kk);
+    });
+    keys.sort();
+    var pairs = [];
+    for (var i = 0; i < keys.length; i++) {
+      var k = keys[i];
+      if (FLOW_VOLATILE_QUERY_RE.test(k)) continue;
+      pairs.push(k + '=' + parsed.searchParams.get(k));
+    }
+    return pairs.join('&');
+  } catch (e) {
+    return '';
+  }
+}
+
+function computeFlowRecordingSignature(rec) {
+  var method = (rec.method || 'GET').toUpperCase();
+  var urlStr = rec.originalUrl || rec.url || '';
+  var pathnameKey = '';
+  try {
+    pathnameKey = getMockKey(urlStr);
+  } catch (ex) {
+    pathnameKey = urlStr;
+  }
+  var qfp = stableQueryFingerprintForFlow(urlStr);
+  var bfp = fingerprintBody(rec.requestBody);
+  return method + '\n' + pathnameKey + '\n' + qfp + '\n' + bfp;
+}
+
+function isDuplicateInActiveFlowRecording(record) {
+  if (!state.flowRecording || !record) return false;
+  var sigs = state.activeFlowRecordingSignatures;
+  if (!sigs || typeof sigs !== 'object') return false;
+  var sig = computeFlowRecordingSignature(record);
+  return !!sigs[sig];
+}
+
+function rememberActiveFlowRecordingSignature(record) {
+  if (!state.flowRecording || !record || !record.id) return;
+  if (!state.activeFlowRecordingSignatures) state.activeFlowRecordingSignatures = {};
+  state.activeFlowRecordingSignatures[computeFlowRecordingSignature(record)] = record.id;
+}
+
 function isDuplicateRequestRecord(record) {
+  if (state.flowRecording) {
+    return isDuplicateInActiveFlowRecording(record);
+  }
   var sig = computeRequestSignature(record);
   var records = state.requestRecords || [];
   for (var i = 0; i < records.length; i++) {
@@ -145,12 +198,216 @@ function isDuplicateRequestRecord(record) {
   return false;
 }
 
+function isInsideAiReqUi(el) {
+  try {
+    var node = el;
+    while (node && node !== document.documentElement) {
+      if (node.className && typeof node.className === 'string' && node.className.indexOf('ai-req-') !== -1) return true;
+      node = node.parentNode;
+    }
+  } catch (e) {}
+  return false;
+}
+
+function getFlowTargetHint(target) {
+  var hint = {
+    tag: '',
+    text: '',
+    id: '',
+    name: '',
+    className: '',
+    type: ''
+  };
+  if (!target) return hint;
+  try {
+    hint.tag = (target.tagName || '').toLowerCase();
+    hint.text = (target.innerText || target.textContent || '').trim().replace(/\s+/g, ' ').substring(0, 80);
+    hint.id = target.id || '';
+    hint.name = target.getAttribute ? (target.getAttribute('name') || '') : '';
+    hint.className = typeof target.className === 'string' ? target.className.substring(0, 120) : '';
+    hint.type = target.getAttribute ? (target.getAttribute('type') || '') : '';
+  } catch (e) {}
+  return hint;
+}
+
+function buildFlowStepTitle(type, targetHint) {
+  if (type === 'navigation') return '打开/切换页面';
+  if (!targetHint) return '用户操作';
+  var label = targetHint.text || targetHint.name || targetHint.id || targetHint.tag || '元素';
+  if (type === 'input' || type === 'change') return '修改 ' + label;
+  if (type === 'submit') return '提交表单';
+  return '点击 ' + label;
+}
+
+function addFlowStep(type, target) {
+  var flow = getActiveFlow();
+  if (!flow || !state.flowRecording) return null;
+  if (!flow.steps) flow.steps = [];
+  var hint = target ? getFlowTargetHint(target) : null;
+  var id = 'step_' + Date.now().toString(36) + '_' + Math.random().toString(36).substr(2, 6);
+  var step = {
+    id: id,
+    index: flow.steps.length + 1,
+    type: type || 'user_action',
+    title: buildFlowStepTitle(type, hint),
+    at: Date.now(),
+    url: location.href,
+    target: hint,
+    requestIds: []
+  };
+  flow.steps.push(step);
+  state.activeFlowLastStepId = id;
+  state.activeFlowLastActionAt = step.at;
+  if (state.flowUi) state.flowUi.selectedStepId = id;
+  saveFlows();
+  if (state.isPanelOpen && state.ui && state.ui.activeMainTab === 'flow') {
+    refreshMainWorkbench();
+  }
+  return step;
+}
+
+function getOrCreateFlowNetworkStep(flow, title) {
+  if (!flow) return null;
+  if (!flow.steps) flow.steps = [];
+  var id = 'step_' + Date.now().toString(36) + '_' + Math.random().toString(36).substr(2, 6);
+  var step = {
+    id: id,
+    index: flow.steps.length + 1,
+    type: 'network_group',
+    title: title || '未归属请求',
+    at: Date.now(),
+    url: location.href,
+    target: null,
+    requestIds: []
+  };
+  flow.steps.push(step);
+  state.activeFlowLastStepId = id;
+  return step;
+}
+
+function classifyFlowRequest(record) {
+  var url = record.originalUrl || record.url || '';
+  var method = (record.method || 'GET').toUpperCase();
+  var lower = String(url || '').toLowerCase();
+  if (/\.(js|css|png|jpg|jpeg|gif|svg|woff|woff2|ttf|eot|ico|mp4|mp3|wav|avi|map|webp)(\?|#|$)/i.test(url)) return 'noise';
+  if (/track|analytics|sentry|beacon|collect|log|monitor/.test(lower)) return 'noise';
+  if (/i18n|locale|translation|translations/.test(lower)) return 'noise';
+  if (/config|dict|setting/.test(lower)) return 'support';
+  if (method === 'POST' || method === 'PUT' || method === 'PATCH' || method === 'DELETE') return 'core';
+  if (record.responseBody && typeof record.responseBody === 'object') return 'core';
+  return 'unknown';
+}
+
+function ensureFlowVerificationFields(flow) {
+  if (!flow) return;
+  if (!flow.verifiedRequestIds) flow.verifiedRequestIds = [];
+  if (!flow.manualVerificationOverrides) flow.manualVerificationOverrides = {};
+}
+
+function setFlowRequestVerified(flow, reqId, verified, source) {
+  ensureFlowVerificationFields(flow);
+  var idx = flow.verifiedRequestIds.indexOf(reqId);
+  if (verified && idx === -1) flow.verifiedRequestIds.push(reqId);
+  if (!verified && idx !== -1) flow.verifiedRequestIds.splice(idx, 1);
+  if (source === 'manual') {
+    flow.manualVerificationOverrides[reqId] = verified ? 'checked' : 'unchecked';
+  }
+}
+
+function autoVerifyFlowRequestIfCore(flow, reqId, cls) {
+  ensureFlowVerificationFields(flow);
+  if (cls !== 'core') return;
+  if (flow.manualVerificationOverrides[reqId] === 'unchecked') return;
+  setFlowRequestVerified(flow, reqId, true, 'auto');
+}
+
+function applyFlowClassificationToRequest(flow, reqId, cls, source) {
+  ensureFlowVerificationFields(flow);
+  if (!flow.classifications) flow.classifications = {};
+  flow.classifications[reqId] = cls;
+  if (!flow.requestMeta) flow.requestMeta = {};
+  if (!flow.requestMeta[reqId]) flow.requestMeta[reqId] = {};
+  flow.requestMeta[reqId].classification = cls;
+  if (cls === 'core') {
+    autoVerifyFlowRequestIfCore(flow, reqId, cls);
+  } else if (cls === 'noise') {
+    setFlowRequestVerified(flow, reqId, false, source === 'manual' ? 'manual' : 'auto');
+  }
+}
+
+function pruneEmptyFlowSteps(flow) {
+  if (!flow || !flow.steps) return 0;
+  var kept = [];
+  var removed = 0;
+  var index = 1;
+  for (var i = 0; i < flow.steps.length; i++) {
+    var step = flow.steps[i];
+    if (!step.requestIds || step.requestIds.length === 0) {
+      removed++;
+      continue;
+    }
+    step.index = index++;
+    kept.push(step);
+  }
+  flow.steps = kept;
+  if (state.activeFlowLastStepId) {
+    var stillActive = false;
+    for (var j = 0; j < kept.length; j++) {
+      if (kept[j].id === state.activeFlowLastStepId) {
+        stillActive = true;
+        break;
+      }
+    }
+    if (!stillActive) state.activeFlowLastStepId = kept.length ? kept[kept.length - 1].id : null;
+  }
+  return removed;
+}
+
+function countFlowStepsWithRequests(flow) {
+  if (!flow || !flow.steps) return 0;
+  var n = 0;
+  for (var i = 0; i < flow.steps.length; i++) {
+    if ((flow.steps[i].requestIds || []).length > 0) n++;
+  }
+  return n;
+}
+
+function attachRequestToActiveFlow(record) {
+  var flow = getActiveFlow();
+  if (!flow || !state.flowRecording || !record || !record.id) return;
+  if (!flow.steps) flow.steps = [];
+  if (!flow.classifications) flow.classifications = {};
+  if (!flow.requestMeta) flow.requestMeta = {};
+  var now = Date.now();
+  var step = null;
+  if (state.activeFlowLastStepId && now - (state.activeFlowLastActionAt || 0) <= 1500) {
+    for (var i = 0; i < flow.steps.length; i++) {
+      if (flow.steps[i].id === state.activeFlowLastStepId) {
+        step = flow.steps[i];
+        break;
+      }
+    }
+  }
+  if (!step && flow.steps.length > 0) {
+    step = flow.steps[flow.steps.length - 1];
+  }
+  if (!step) step = getOrCreateFlowNetworkStep(flow, '录制期间请求');
+  if (step.requestIds.indexOf(record.id) === -1) step.requestIds.push(record.id);
+  var cls = flow.classifications[record.id] || classifyFlowRequest(record);
+  applyFlowClassificationToRequest(flow, record.id, cls, 'auto');
+  flow.requestMeta[record.id].stepId = step.id;
+  flow.requestMeta[record.id].stepIndex = step.index;
+  rememberActiveFlowRecordingSignature(record);
+  saveFlows();
+}
+
 function addRequestRecord(record) {
   if (record.debugRule) {
     record.debugRule = normalizeRule(record.debugRule, getMockKey(record.originalUrl || record.url), record.method);
   }
   if (isDuplicateRequestRecord(record)) return;
   state.requestRecords.push(record);
+  attachRequestToActiveFlow(record);
   if (state.requestRecords.length > MAX_RECORDS) {
     state.requestRecords.shift();
   }
@@ -161,8 +418,42 @@ function addRequestRecord(record) {
 
 function setupRequestInterception() {
   setupPageContextInterception();
+  setupFlowStepRecording();
   interceptXHR();
   interceptFetch();
+}
+
+function setupFlowStepRecording() {
+  if (state.flowStepRecordingReady) return;
+  state.flowStepRecordingReady = true;
+  var lastInputAt = 0;
+  function handleAction(type, event) {
+    if (!state.flowRecording) return;
+    var target = event && event.target;
+    if (isInsideAiReqUi(target)) return;
+    if (type === 'input' || type === 'change') {
+      var now = Date.now();
+      if (now - lastInputAt < 800) return;
+      lastInputAt = now;
+      if (target && target.getAttribute && String(target.getAttribute('type') || '').toLowerCase() === 'password') return;
+    }
+    addFlowStep(type === 'click' ? 'user_action' : type, target);
+  }
+  document.addEventListener('click', function (event) { handleAction('click', event); }, true);
+  document.addEventListener('input', function (event) { handleAction('input', event); }, true);
+  document.addEventListener('change', function (event) { handleAction('change', event); }, true);
+  document.addEventListener('submit', function (event) { handleAction('submit', event); }, true);
+  var lastHref = location.href;
+  setInterval(function () {
+    if (!state.flowRecording) {
+      lastHref = location.href;
+      return;
+    }
+    if (location.href !== lastHref) {
+      lastHref = location.href;
+      addFlowStep('navigation', null);
+    }
+  }, 800);
 }
 
 function setupPageContextInterception() {

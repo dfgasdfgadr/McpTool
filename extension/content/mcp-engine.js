@@ -1008,6 +1008,111 @@ function pickGeneratorForRequests() {
   return state.mcpUseEnhancedGeneration ? generateMcpToolsFromRecordsEnhanced : generateMcpToolsFromRecords;
 }
 
+function collectFlowVerifiedRecords(flow) {
+  var verifiedIds = (flow && flow.verifiedRequestIds) || [];
+  var records = [];
+  for (var i = 0; i < verifiedIds.length; i++) {
+    var req = typeof findRequestById === 'function' ? findRequestById(verifiedIds[i]) : null;
+    if (!req) continue;
+    var cls = (flow.classifications && flow.classifications[verifiedIds[i]]) || 'unknown';
+    if (cls === 'noise') continue;
+    records.push(req);
+  }
+  return records;
+}
+
+function findFlowStepForRequest(flow, reqId) {
+  var steps = (flow && flow.steps) || [];
+  for (var i = 0; i < steps.length; i++) {
+    if ((steps[i].requestIds || []).indexOf(reqId) !== -1) return steps[i];
+  }
+  return null;
+}
+
+function findFlowRequestIdsForTool(flow, tool) {
+  var method = tool && tool._meta ? (tool._meta.method || '').toUpperCase() : '';
+  var pathname = tool && tool._meta ? (tool._meta.pathname || '') : '';
+  var pathPatternKey = tool && tool._meta ? (tool._meta.pathPatternKey || '') : '';
+  var ids = (flow && flow.verifiedRequestIds) || [];
+  var matched = [];
+  for (var i = 0; i < ids.length; i++) {
+    var req = typeof findRequestById === 'function' ? findRequestById(ids[i]) : null;
+    if (!req) continue;
+    var reqMethod = (req.method || 'GET').toUpperCase();
+    var reqPath = normalizePathnameFromRecordUrl(req.originalUrl || req.url || '');
+    if (reqMethod !== method) continue;
+    if (reqPath === pathname) {
+      matched.push(ids[i]);
+      continue;
+    }
+    if (pathPatternKey) {
+      var reqPatternKey = reqMethod + '\t' + patternKeyFromNormalizedPath(reqPath);
+      if (reqPatternKey === pathPatternKey) matched.push(ids[i]);
+    }
+  }
+  return matched;
+}
+
+function annotateFlowMetaOnTool(tool, flow) {
+  if (!tool || !flow) return tool;
+  if (!tool._meta) tool._meta = {};
+  var matchedIds = findFlowRequestIdsForTool(flow, tool);
+  var steps = [];
+  for (var i = 0; i < matchedIds.length; i++) {
+    var step = findFlowStepForRequest(flow, matchedIds[i]);
+    if (!step) continue;
+    steps.push({
+      stepId: step.id,
+      stepIndex: step.index,
+      stepTitle: step.title,
+      requestId: matchedIds[i],
+      classification: (flow.classifications && flow.classifications[matchedIds[i]]) || 'unknown'
+    });
+  }
+  tool._meta.flow = {
+    flowId: flow.id,
+    flowName: flow.name,
+    hostname: flow.hostname || location.hostname,
+    verifiedRequestIds: matchedIds,
+    steps: steps
+  };
+  tool._meta.verifiedByFlow = true;
+  tool._meta.aiVisible = true;
+  tool._meta.usability = tool._meta.usability || {
+    verified: true,
+    tested: false,
+    lastTestAt: null,
+    lastError: ''
+  };
+  return tool;
+}
+
+function generateMcpToolsFromFlow(flow) {
+  if (!flow) return { added: 0, skipped: 0 };
+  var records = collectFlowVerifiedRecords(flow);
+  if (records.length === 0) return { added: 0, skipped: 0 };
+  var generator = typeof pickGeneratorForRequests === 'function' ? pickGeneratorForRequests() : generateMcpToolsFromRecords;
+  var tools = generator(records);
+  for (var i = 0; i < tools.length; i++) {
+    annotateFlowMetaOnTool(tools[i], flow);
+  }
+  var beforeNames = Object.keys(state.mcpTools || {});
+  var stats = mergeGeneratedMcpToolsIntoState(tools);
+  var afterNames = Object.keys(state.mcpTools || {});
+  if (!flow.mcpToolNames) flow.mcpToolNames = [];
+  for (var j = 0; j < afterNames.length; j++) {
+    if (beforeNames.indexOf(afterNames[j]) === -1 && flow.mcpToolNames.indexOf(afterNames[j]) === -1) {
+      flow.mcpToolNames.push(afterNames[j]);
+    }
+  }
+  if (stats.added > 0) {
+    saveMcpTools();
+    saveFlows();
+    try { chrome.runtime.sendMessage({ type: 'MCP_SYNC_TOOLS' }); } catch (e) {}
+  }
+  return stats;
+}
+
 var MCP_TOOLS_KEY_PREFIX = 'ai_req_mcp_tools_';
 
 function loadToolsObjectForHostname(hostname) {
@@ -1043,6 +1148,21 @@ function setMcpToolEnabledOnHost(hostname, toolName, enabled) {
   if (!toolsObj[toolName]) return false;
   toolsObj[toolName].enabled = enabled;
   persistToolsObjectForHostname(hostname, toolsObj);
+  return true;
+}
+
+function updateMcpToolUsability(toolName, patch, hostname) {
+  var targetHost = hostname || location.hostname;
+  var toolsObj = loadToolsObjectForHostname(targetHost);
+  if (!toolsObj[toolName] && targetHost === location.hostname && state.mcpTools && state.mcpTools[toolName]) {
+    toolsObj = state.mcpTools;
+  }
+  if (!toolsObj[toolName]) return false;
+  var tool = toolsObj[toolName];
+  if (!tool._meta) tool._meta = {};
+  var current = tool._meta.usability || {};
+  tool._meta.usability = Object.assign({}, current, patch || {});
+  persistToolsObjectForHostname(targetHost, toolsObj);
   return true;
 }
 

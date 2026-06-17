@@ -73,12 +73,243 @@ function createFloatingBall() {
 }
 
 function toggleMainPanel() {
+  if (state.flowRecording && state.recordingTrayVisible) {
+    openMainPanelForFlowRecording();
+    return;
+  }
   state.isPanelOpen = !state.isPanelOpen;
   if (state.isPanelOpen) {
     state.mainPanel.style.display = 'flex';
     refreshMainWorkbench();
   } else {
     state.mainPanel.style.display = 'none';
+  }
+}
+
+function capturePanelScroll(selector) {
+  if (!state.mainPanel) return 0;
+  var el = state.mainPanel.querySelector(selector);
+  return el ? el.scrollTop : 0;
+}
+
+function restorePanelScroll(selector, scrollTop) {
+  if (!state.mainPanel) return;
+  var el = state.mainPanel.querySelector(selector);
+  if (el) el.scrollTop = scrollTop;
+}
+
+function syncRequestSelectionChrome() {
+  if (!state.mainPanel) return;
+  var bulkBarOuter = state.mainPanel.querySelector('.ai-req-req-bulk-bar');
+  if (bulkBarOuter) {
+    var bn = selectionCountRequests();
+    bulkBarOuter.style.display = bn > 0 ? 'flex' : 'none';
+    var spn = bulkBarOuter.querySelector('.ai-req-req-bulk-count');
+    if (spn) spn.textContent = '已选 ' + bn;
+  }
+}
+
+function updateRecordingTrayContent(flowName) {
+  var tray = state.recordingTrayEl;
+  if (!tray) return;
+  var nameEl = tray.querySelector('.ai-req-recording-tray-name');
+  if (nameEl) nameEl.textContent = flowName || '未命名流程';
+}
+
+function ensureRecordingTray() {
+  if (state.recordingTrayEl && document.contains(state.recordingTrayEl)) {
+    return state.recordingTrayEl;
+  }
+  var tray = document.createElement('div');
+  tray.className = 'ai-req-recording-tray';
+  tray.innerHTML =
+    '<div class="ai-req-recording-tray-indicator"><span class="ai-req-recording-tray-dot"></span><span class="ai-req-recording-tray-status">正在录制</span></div>' +
+    '<div class="ai-req-recording-tray-name"></div>' +
+    '<div class="ai-req-recording-tray-actions">' +
+    '  <button type="button" class="ai-req-btn ai-req-btn-secondary ai-req-recording-tray-open">打开面板</button>' +
+    '  <button type="button" class="ai-req-btn ai-req-btn-danger ai-req-recording-tray-stop">结束录制</button>' +
+    '</div>';
+  var openBtn = tray.querySelector('.ai-req-recording-tray-open');
+  var stopBtn = tray.querySelector('.ai-req-recording-tray-stop');
+  if (openBtn) {
+    openBtn.addEventListener('click', function () {
+      openMainPanelForFlowRecording();
+    });
+  }
+  if (stopBtn) {
+    stopBtn.addEventListener('click', function () {
+      stopFlowRecordingFromTray(true);
+    });
+  }
+  safeAppendChild(tray);
+  state.recordingTrayEl = tray;
+  return tray;
+}
+
+function enterFlowRecordingTrayMode(flow) {
+  state.recordingTrayVisible = true;
+  var tray = ensureRecordingTray();
+  updateRecordingTrayContent(flow && flow.name);
+  tray.style.display = 'flex';
+  if (state.mainPanel) state.mainPanel.style.display = 'none';
+  state.isPanelOpen = false;
+  if (state.floatingBall) state.floatingBall.style.display = 'none';
+}
+
+function hideRecordingTray() {
+  state.recordingTrayVisible = false;
+  if (state.recordingTrayEl) state.recordingTrayEl.style.display = 'none';
+  if (state.floatingBall) state.floatingBall.style.display = 'flex';
+}
+
+function openMainPanelForFlowRecording() {
+  ensureMainUiState();
+  state.ui.activeMainTab = 'flow';
+  state.isPanelOpen = true;
+  if (state.mainPanel) {
+    state.mainPanel.style.display = 'flex';
+    state.mainPanel.setAttribute('data-ai-req-tab', 'flow');
+  }
+  refreshMainWorkbench();
+}
+
+function showFlowMcpResultDialog(flow, stats) {
+  var existing = document.querySelector('.ai-req-flow-mcp-result-overlay');
+  if (existing) existing.remove();
+  var overlay = document.createElement('div');
+  overlay.className = 'ai-req-confirm-overlay ai-req-flow-mcp-result-overlay';
+  var modal = document.createElement('div');
+  modal.className = 'ai-req-confirm-modal ai-req-flow-mcp-result-modal';
+  var title = document.createElement('div');
+  title.className = 'ai-req-confirm-title';
+  title.textContent = '录制完成 · MCP 工具已生成';
+  var body = document.createElement('div');
+  body.className = 'ai-req-confirm-body';
+  var verified = (flow.verifiedRequestIds || []).length;
+  body.textContent =
+    '流程「' +
+    (flow.name || '未命名流程') +
+    '」已结束。新增 MCP 工具 ' +
+    (stats.added || 0) +
+    ' 个，跳过 ' +
+    (stats.skipped || 0) +
+    ' 个。已验证请求 ' +
+    verified +
+    ' 个。';
+  var actions = document.createElement('div');
+  actions.className = 'ai-req-confirm-actions ai-req-flow-mcp-result-actions';
+  var viewBtn = document.createElement('button');
+  viewBtn.type = 'button';
+  viewBtn.className = 'ai-req-btn ai-req-btn-primary';
+  viewBtn.textContent = '查看 MCP 工具';
+  viewBtn.addEventListener('click', function () {
+    overlay.remove();
+    ensureMainUiState();
+    state.ui.activeMainTab = 'mcp';
+    state.mcpPanelTab = 'list';
+    state.isPanelOpen = true;
+    if (state.mainPanel) state.mainPanel.style.display = 'flex';
+    refreshMainWorkbench();
+  });
+  var closeBtn = document.createElement('button');
+  closeBtn.type = 'button';
+  closeBtn.className = 'ai-req-btn ai-req-btn-secondary';
+  closeBtn.textContent = '留在 Flow';
+  closeBtn.addEventListener('click', function () {
+    overlay.remove();
+    ensureMainUiState();
+    state.ui.activeMainTab = 'flow';
+    refreshMainWorkbench();
+  });
+  actions.appendChild(viewBtn);
+  actions.appendChild(closeBtn);
+  modal.appendChild(title);
+  modal.appendChild(body);
+  modal.appendChild(actions);
+  overlay.appendChild(modal);
+  overlay.addEventListener('click', function (e) {
+    if (e.target === overlay) overlay.remove();
+  });
+  safeAppendChild(overlay);
+}
+
+function finishFlowRecordingCommon(openMcpAfter) {
+  var flowId = state.activeFlowId || (state.flowUi && state.flowUi.selectedFlowId);
+  var flow = finishFlow(flowId);
+  if (flow) {
+    pruneEmptyFlowSteps(flow);
+    saveFlows();
+  }
+  hideRecordingTray();
+  if (!flow) {
+    refreshFlowWorkbench();
+    return null;
+  }
+  state.flowUi.selectedFlowId = flow.id;
+  ensureMainUiState();
+  state.ui.activeMainTab = 'flow';
+  state.isPanelOpen = true;
+  if (state.mainPanel) {
+    state.mainPanel.style.display = 'flex';
+    state.mainPanel.setAttribute('data-ai-req-tab', 'flow');
+  }
+  refreshMainWorkbench();
+  if (openMcpAfter) {
+    var stats = { added: 0, skipped: 0 };
+    if (typeof generateMcpToolsFromFlow === 'function') {
+      stats = generateMcpToolsFromFlow(flow) || stats;
+    }
+    state.ui.activeMainTab = 'mcp';
+    state.mcpPanelTab = 'list';
+    refreshMainWorkbench();
+    showFlowMcpResultDialog(flow, stats);
+  }
+  return flow;
+}
+
+function stopFlowRecordingFromTray(openMcpAfter) {
+  finishFlowRecordingCommon(!!openMcpAfter);
+  showToast('流程录制已结束', 2500, 'success');
+}
+
+function handleFlowClassificationChange(flow, reqId, cls) {
+  if (!flow || !reqId) return;
+  applyFlowClassificationToRequest(flow, reqId, cls || 'unknown', 'manual');
+  saveFlows();
+}
+
+function handleFlowVerifiedChange(flow, reqId, checked) {
+  if (!flow || !reqId) return;
+  setFlowRequestVerified(flow, reqId, !!checked, 'manual');
+  saveFlows();
+}
+
+function patchFlowRequestRowUi(pane, flow, reqId) {
+  if (!pane || !flow || !reqId) return;
+  var row = pane.querySelector('.ai-req-flow-request[data-req-id="' + reqId + '"]');
+  if (!row) return;
+  var cls = (flow.classifications && flow.classifications[reqId]) || 'unknown';
+  var verified = flow.verifiedRequestIds && flow.verifiedRequestIds.indexOf(reqId) !== -1;
+  var sel = row.querySelector('.ai-req-flow-class-select');
+  if (sel) sel.value = cls;
+  var cb = row.querySelector('.ai-req-flow-verified-cb');
+  if (cb) cb.checked = verified;
+}
+
+function patchFlowSummaryUi(pane, flow) {
+  if (!pane || !flow) return;
+  var summaryLine = pane.querySelector('.ai-req-flow-summary > div:last-child');
+  if (summaryLine) {
+    var stepCount = typeof countFlowStepsWithRequests === 'function'
+      ? countFlowStepsWithRequests(flow)
+      : (flow.steps || []).length;
+    var verifiedCount = (flow.verifiedRequestIds || []).length;
+    summaryLine.textContent =
+      '步骤 ' +
+      stepCount +
+      ' · 已验证请求 ' +
+      verifiedCount +
+      (state.activeFlowId === flow.id && state.flowRecording ? ' · 录制中' : '');
   }
 }
 
@@ -256,6 +487,221 @@ function refreshMainNavButtons() {
   }
 }
 
+function getSelectedFlow() {
+  ensureFlowState();
+  var id = (state.flowUi && state.flowUi.selectedFlowId) || state.activeFlowId;
+  if (id && state.flows[id]) return state.flows[id];
+  var ids = Object.keys(state.flows || {});
+  ids.sort(function (a, b) {
+    return ((state.flows[b] && state.flows[b].startedAt) || 0) - ((state.flows[a] && state.flows[a].startedAt) || 0);
+  });
+  if (ids.length > 0) {
+    state.flowUi.selectedFlowId = ids[0];
+    return state.flows[ids[0]];
+  }
+  return null;
+}
+
+function flowRequestLine(req) {
+  if (!req) return '';
+  var urlText = extractRequestPath(req.originalUrl || req.url || '');
+  return ((req.method || 'GET').toUpperCase() + ' ' + urlText).trim();
+}
+
+function renderFlowRequestRow(flow, reqId) {
+  var req = findRequestById(reqId);
+  if (!req) return '';
+  var cls = (flow.classifications && flow.classifications[reqId]) || 'unknown';
+  var verified = flow.verifiedRequestIds && flow.verifiedRequestIds.indexOf(reqId) !== -1;
+  return '' +
+    '<div class="ai-req-flow-request" data-req-id="' + escapeHtml(reqId) + '">' +
+    '  <div class="ai-req-flow-request-main">' +
+    '    <span class="ai-req-method-badge ai-req-method-' + escapeHtml((req.method || 'GET').toLowerCase()) + '">' + escapeHtml((req.method || 'GET').toUpperCase()) + '</span>' +
+    '    <span class="ai-req-flow-request-url" title="' + escapeHtml(req.originalUrl || req.url || '') + '">' + escapeHtml(flowRequestLine(req)) + '</span>' +
+    '    <span class="ai-req-flow-status">' + escapeHtml(req.responseStatus || 0) + '</span>' +
+    '  </div>' +
+    '  <div class="ai-req-flow-request-actions">' +
+    '    <select class="ai-req-flow-class-select" data-req-id="' + escapeHtml(reqId) + '">' +
+    '      <option value="core"' + (cls === 'core' ? ' selected' : '') + '>核心</option>' +
+    '      <option value="support"' + (cls === 'support' ? ' selected' : '') + '>支撑</option>' +
+    '      <option value="noise"' + (cls === 'noise' ? ' selected' : '') + '>噪音</option>' +
+    '      <option value="unknown"' + (cls === 'unknown' ? ' selected' : '') + '>待判定</option>' +
+    '    </select>' +
+    '    <label class="ai-req-flow-verified-label"><input type="checkbox" class="ai-req-flow-verified-cb" data-req-id="' + escapeHtml(reqId) + '"' + (verified ? ' checked' : '') + '> 已验证</label>' +
+    '  </div>' +
+    '</div>';
+}
+
+function renderFlowStepCard(flow, step) {
+  var requestIds = step.requestIds || [];
+  var html = '';
+  html += '<div class="ai-req-flow-step" data-step-id="' + escapeHtml(step.id) + '">';
+  html += '  <div class="ai-req-flow-step-head">';
+  html += '    <span class="ai-req-flow-step-index">' + escapeHtml(step.index || 0) + '</span>';
+  html += '    <div class="ai-req-flow-step-title-wrap">';
+  html += '      <div class="ai-req-flow-step-title">' + escapeHtml(step.title || '用户步骤') + '</div>';
+  html += '      <div class="ai-req-flow-step-meta">' + escapeHtml(step.type || 'user_action') + ' · ' + escapeHtml(new Date(step.at || Date.now()).toLocaleTimeString()) + '</div>';
+  html += '    </div>';
+  html += '    <span class="ai-req-flow-step-count">' + requestIds.length + ' 请求</span>';
+  html += '  </div>';
+  if (requestIds.length === 0) {
+    html += '<div class="ai-req-flow-empty-inline">该步骤暂无归属请求</div>';
+  } else {
+    html += '<div class="ai-req-flow-request-list">';
+    for (var i = 0; i < requestIds.length; i++) {
+      html += renderFlowRequestRow(flow, requestIds[i]);
+    }
+    html += '</div>';
+  }
+  html += '</div>';
+  return html;
+}
+
+function refreshFlowWorkbench() {
+  if (!state.mainPanel) return;
+  ensureFlowState();
+  var pane = state.mainPanel.querySelector('.ai-req-flow-workbench');
+  if (!pane) return;
+  var savedScrollTop = capturePanelScroll('.ai-req-flow-steps');
+  var selected = getSelectedFlow();
+  var flowIds = Object.keys(state.flows || {});
+  flowIds.sort(function (a, b) {
+    return ((state.flows[b] && state.flows[b].startedAt) || 0) - ((state.flows[a] && state.flows[a].startedAt) || 0);
+  });
+  var html = '';
+  html += '<div class="ai-req-flow-toolbar">';
+  html += '  <button type="button" class="ai-req-btn ai-req-btn-primary ai-req-flow-start-btn">' + (state.flowRecording ? '重新开始录制' : '开始录制') + '</button>';
+  html += '  <button type="button" class="ai-req-btn ai-req-btn-secondary ai-req-flow-stop-btn"' + (state.flowRecording ? '' : ' disabled') + '>结束录制</button>';
+  html += '  <select class="ai-req-flow-select">';
+  if (flowIds.length === 0) {
+    html += '    <option value="">暂无流程</option>';
+  } else {
+    for (var fi = 0; fi < flowIds.length; fi++) {
+      var f = state.flows[flowIds[fi]];
+      html += '    <option value="' + escapeHtml(f.id) + '"' + (selected && selected.id === f.id ? ' selected' : '') + '>' + escapeHtml(f.name || f.id) + '</option>';
+    }
+  }
+  html += '  </select>';
+  html += '  <select class="ai-req-flow-filter">';
+  var filters = ['all', 'core', 'support', 'noise', 'unknown', 'verified'];
+  var labels = { all: '全部请求', core: '核心', support: '支撑', noise: '噪音', unknown: '待判定', verified: '已验证' };
+  for (var ff = 0; ff < filters.length; ff++) {
+    var fv = filters[ff];
+    html += '    <option value="' + fv + '"' + (state.flowUi.filterClassification === fv ? ' selected' : '') + '>' + labels[fv] + '</option>';
+  }
+  html += '  </select>';
+  html += '  <button type="button" class="ai-req-btn ai-req-btn-secondary ai-req-flow-mcp-btn"' + (selected ? '' : ' disabled') + '>已验证生成 MCP</button>';
+  html += '</div>';
+
+  if (!selected) {
+    html += '<div class="ai-req-flow-empty">还没有录制流程。点击“开始录制”，按真实业务顺序操作页面，请求会自动挂到步骤下。</div>';
+    pane.innerHTML = html;
+    bindFlowWorkbench(pane);
+    return;
+  }
+
+  var verifiedCount = (selected.verifiedRequestIds || []).length;
+  var stepCountDisplay = typeof countFlowStepsWithRequests === 'function'
+    ? countFlowStepsWithRequests(selected)
+    : (selected.steps || []).length;
+  html += '<div class="ai-req-flow-summary">';
+  html += '  <div><strong>' + escapeHtml(selected.name || '未命名流程') + '</strong><span>' + escapeHtml(selected.hostname || location.hostname) + '</span></div>';
+  html += '  <div>步骤 ' + stepCountDisplay + ' · 已验证请求 ' + verifiedCount + (state.activeFlowId === selected.id && state.flowRecording ? ' · 录制中' : '') + '</div>';
+  html += '</div>';
+  html += '<div class="ai-req-flow-steps">';
+  var shownAny = false;
+  var clsFilter = state.flowUi.filterClassification || 'all';
+  for (var si = 0; si < (selected.steps || []).length; si++) {
+    var step = selected.steps[si];
+    var originalReqIds = step.requestIds || [];
+    if (originalReqIds.length === 0) continue;
+    if (clsFilter !== 'all') {
+      step = Object.assign({}, step);
+      step.requestIds = originalReqIds.filter(function (rid) {
+        if (clsFilter === 'verified') return (selected.verifiedRequestIds || []).indexOf(rid) !== -1;
+        return ((selected.classifications || {})[rid] || 'unknown') === clsFilter;
+      });
+      if (step.requestIds.length === 0) continue;
+    }
+    shownAny = true;
+    html += renderFlowStepCard(selected, step);
+  }
+  if (!shownAny) {
+    html += '<div class="ai-req-flow-empty">当前筛选下没有请求。</div>';
+  }
+  html += '</div>';
+  pane.innerHTML = html;
+  bindFlowWorkbench(pane);
+  restorePanelScroll('.ai-req-flow-steps', savedScrollTop);
+}
+
+function bindFlowWorkbench(pane) {
+  var startBtn = pane.querySelector('.ai-req-flow-start-btn');
+  if (startBtn) {
+    startBtn.addEventListener('click', function () {
+      var defaultName = '流程 ' + new Date().toLocaleString();
+      var name = prompt('给这个调试流程起个名字', defaultName);
+      if (name === null) return;
+      var flow = createFlow((name || defaultName).trim());
+      addFlowStep('navigation', null);
+      showToast('已开始录制流程');
+      enterFlowRecordingTrayMode(flow);
+    });
+  }
+  var stopBtn = pane.querySelector('.ai-req-flow-stop-btn');
+  if (stopBtn) {
+    stopBtn.addEventListener('click', function () {
+      finishFlowRecordingCommon(false);
+      showToast('流程录制已结束');
+    });
+  }
+  var select = pane.querySelector('.ai-req-flow-select');
+  if (select) {
+    select.addEventListener('change', function () {
+      state.flowUi.selectedFlowId = select.value || null;
+      refreshFlowWorkbench();
+    });
+  }
+  var filter = pane.querySelector('.ai-req-flow-filter');
+  if (filter) {
+    filter.addEventListener('change', function () {
+      state.flowUi.filterClassification = filter.value || 'all';
+      refreshFlowWorkbench();
+    });
+  }
+  var classSelects = pane.querySelectorAll('.ai-req-flow-class-select');
+  for (var ci = 0; ci < classSelects.length; ci++) {
+    classSelects[ci].addEventListener('change', function () {
+      var flow = getSelectedFlow();
+      if (!flow) return;
+      var reqId = this.getAttribute('data-req-id');
+      handleFlowClassificationChange(flow, reqId, this.value || 'unknown');
+      patchFlowRequestRowUi(pane, flow, reqId);
+      patchFlowSummaryUi(pane, flow);
+    });
+  }
+  var verifiedCbs = pane.querySelectorAll('.ai-req-flow-verified-cb');
+  for (var vi = 0; vi < verifiedCbs.length; vi++) {
+    verifiedCbs[vi].addEventListener('change', function () {
+      var flow = getSelectedFlow();
+      if (!flow) return;
+      var reqId = this.getAttribute('data-req-id');
+      handleFlowVerifiedChange(flow, reqId, this.checked);
+      patchFlowSummaryUi(pane, flow);
+    });
+  }
+  var mcpBtn = pane.querySelector('.ai-req-flow-mcp-btn');
+  if (mcpBtn) {
+    mcpBtn.addEventListener('click', function () {
+      var flow = getSelectedFlow();
+      if (!flow || typeof generateMcpToolsFromFlow !== 'function') return;
+      var stats = generateMcpToolsFromFlow(flow);
+      showToast('Flow MCP 新增 ' + stats.added + '，跳过 ' + stats.skipped);
+      refreshFlowWorkbench();
+    });
+  }
+}
+
 function refreshMainWorkbench() {
   if (!state.mainPanel) return;
   ensureMainUiState();
@@ -268,6 +714,8 @@ function refreshMainWorkbench() {
   } else if (state.ui.activeMainTab === 'mcp') {
     if (!state.mcpPanelTab) state.mcpPanelTab = 'list';
     refreshMainPanelContent();
+  } else if (state.ui.activeMainTab === 'flow') {
+    refreshFlowWorkbench();
   } else if (state.ui.activeMainTab === 'settings') {
     hydrateSettingsWorkbench();
   }
@@ -395,6 +843,7 @@ function createMainPanel() {
   navRail.className = 'ai-req-nav-rail';
   navRail.setAttribute('role', 'tablist');
   navRail.appendChild(createMainNavButton('requests', '\u8BF7\u6C42', 'REQ'));
+  navRail.appendChild(createMainNavButton('flow', '\u6D41\u7A0B', 'FLOW'));
   navRail.appendChild(createMainNavButton('mcp', 'MCP', 'MCP'));
   navRail.appendChild(createMainNavButton('settings', '\u8BBE\u7F6E', 'SET'));
 
@@ -673,6 +1122,10 @@ function createMainPanel() {
   requestPane.appendChild(mainBody);
   requestPane.appendChild(bottomInput);
 
+  var flowPane = document.createElement('div');
+  flowPane.className = 'ai-req-workbench ai-req-flow-workbench';
+  flowPane.setAttribute('data-workbench', 'flow');
+
   var mcpPane = document.createElement('div');
   mcpPane.className = 'ai-req-workbench ai-req-mcp-workbench';
   mcpPane.setAttribute('data-workbench', 'mcp');
@@ -720,6 +1173,7 @@ function createMainPanel() {
     '</div>';
 
   workbenchStage.appendChild(requestPane);
+  workbenchStage.appendChild(flowPane);
   workbenchStage.appendChild(mcpPane);
   workbenchStage.appendChild(settingsPane);
   shellBody.appendChild(navRail);
@@ -1244,7 +1698,7 @@ function appendRequestRowToList(listElInner, req, kwEffective) {
   cb.addEventListener('change', function () {
     if (cb.checked) state.selectedReqIds[req.id] = true;
     else delete state.selectedReqIds[req.id];
-    refreshRequestList(kwEffective, true);
+    syncRequestSelectionChrome();
   });
   cbCell.appendChild(cb);
 
@@ -1331,6 +1785,7 @@ function refreshRequestList(keyword, skipPruneSel) {
   var listEl = state.mainPanel.querySelector('.ai-req-request-list');
   var countEl = state.mainPanel.querySelector('.ai-req-req-count');
   if (!listEl || !countEl) return;
+  var savedScrollTop = listEl.scrollTop;
   listEl.innerHTML = '';
 
   var filtered = filterRequestRecords(state.requestRecords, kwEffective);
@@ -1384,6 +1839,7 @@ function refreshRequestList(keyword, skipPruneSel) {
     listEl.appendChild(empty);
     renderRequestInspector(null, kwEffective);
     syncRequestInspectorVisibility();
+    listEl.scrollTop = savedScrollTop;
     return;
   }
 
@@ -1440,6 +1896,7 @@ function refreshRequestList(keyword, skipPruneSel) {
     kwEffective
   );
   syncRequestInspectorVisibility();
+  listEl.scrollTop = savedScrollTop;
 }
 
 function getMethodClass(method) {

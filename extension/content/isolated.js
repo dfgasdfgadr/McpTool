@@ -4,6 +4,7 @@
       loadConfig();
       loadMockRules();
       loadMcpTools();
+      loadFlows();
       setupMenuCommands();
       setupRequestInterception();
     });
@@ -29,8 +30,12 @@
       if (state.mainPanel && !document.contains(state.mainPanel)) {
         try { getContainer().appendChild(state.mainPanel); } catch (e2) {}
       }
+      if (state.recordingTrayEl && !document.contains(state.recordingTrayEl)) {
+        try { getContainer().appendChild(state.recordingTrayEl); } catch (e3) {}
+      }
       ensureElementInViewport(state.floatingBall, 56, 56, '20px', '20px');
       ensureElementInViewport(state.mainPanel, 420, 620, '90px', '20px');
+      ensureElementInViewport(state.recordingTrayEl, 260, 112, '20px', '20px');
     }, 2000);
   }
 

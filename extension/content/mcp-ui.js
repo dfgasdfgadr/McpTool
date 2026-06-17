@@ -70,6 +70,23 @@ function buildMcpToolInspectorHTML(toolName) {
   html += '<div class="ai-req-detail-label">启用状态</div>';
   html += '<label class="ai-req-mcp-inspector-enabled-label"><input type="checkbox" class="ai-req-mcp-tool-enabled ai-req-mcp-inspector-enabled" data-tool-name="' + escapeHtml(toolName) + '"' + (enabled ? ' checked' : '') + '> 启用此工具</label>';
   html += '</div>';
+  var usability = meta.usability || {};
+  var flowMeta = meta.flow || null;
+  html += '<div class="ai-req-mcp-inspector-section">';
+  html += '<div class="ai-req-detail-label">AI 可用性</div>';
+  html += '<div class="ai-req-detail-value">';
+  html += usability.tested ? '已测试' : (usability.verified ? '已验证，待测试' : '未验证');
+  if (usability.lastStatus) html += ' · HTTP ' + escapeHtml(usability.lastStatus);
+  if (usability.lastTestAt) html += ' · ' + escapeHtml(new Date(usability.lastTestAt).toLocaleString());
+  if (usability.lastError) html += '<br><span class="ai-req-mcp-usability-error">' + escapeHtml(usability.lastError) + '</span>';
+  html += '</div>';
+  html += '</div>';
+  if (flowMeta) {
+    html += '<div class="ai-req-mcp-inspector-section">';
+    html += '<div class="ai-req-detail-label">来源流程</div>';
+    html += '<div class="ai-req-detail-value">' + escapeHtml(flowMeta.flowName || flowMeta.flowId || '') + ' · ' + ((flowMeta.steps || []).length) + ' 步验证</div>';
+    html += '</div>';
+  }
   var props = (tool.inputSchema && tool.inputSchema.properties) || {};
   var required = (tool.inputSchema && tool.inputSchema.required) || [];
   var propKeys = Object.keys(props);
@@ -1631,6 +1648,13 @@ function openMcpToolTester(toolName) {
       execBtn.textContent = '\u6267\u884C';
       resultArea.style.display = 'block';
       if (resp && resp.ok) {
+        updateMcpToolUsability(toolName, {
+          verified: true,
+          tested: resp.status >= 200 && resp.status < 300,
+          lastTestAt: Date.now(),
+          lastStatus: resp.status || 0,
+          lastError: resp.status >= 200 && resp.status < 300 ? '' : ('HTTP ' + (resp.status || 0))
+        }, resolveMcpToolHostFromView(toolName));
         var statusClass = resp.status >= 200 && resp.status < 300 ? 'ai-req-mcp-tester-success' : 'ai-req-mcp-tester-warn';
         resultArea.innerHTML = '<div class="ai-req-mcp-tester-status ' + statusClass + '">\u72B6\u6001\u7801: ' + (resp.status || 0) + '</div>';
         var resultPre = document.createElement('pre');
@@ -1642,8 +1666,17 @@ function openMcpToolTester(toolName) {
         }
         resultArea.appendChild(resultPre);
       } else {
+        updateMcpToolUsability(toolName, {
+          verified: true,
+          tested: false,
+          lastTestAt: Date.now(),
+          lastStatus: 0,
+          lastError: (resp && resp.error) || '未知错误'
+        }, resolveMcpToolHostFromView(toolName));
         resultArea.innerHTML = '<div class="ai-req-mcp-tester-error">\u8BF7\u6C42\u5931\u8D25: ' + escapeHtml((resp && resp.error) || '\u672A\u77E5\u9519\u8BEF') + '</div>';
       }
+      var mcpContent = state.mainPanel ? state.mainPanel.querySelector('.ai-req-mcp-content') : null;
+      if (mcpContent) renderMcpToolInspector(mcpContent, toolName);
     });
   });
 

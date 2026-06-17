@@ -78,6 +78,7 @@ var DEFAULT_CONFIG = {
 
 var CONFIG_KEY = 'ai_req_analyzer_config';
 var MOCK_RULES_KEY_PREFIX = 'ai_req_mock_rules_';
+var FLOWS_KEY_PREFIX = 'ai_req_flows_';
 var PAGE_RECORD_MSG = 'AI_REQ_ANALYZER_PAGE_RECORD';
 var PAGE_MOCK_RULES_MSG = 'AI_REQ_ANALYZER_MOCK_RULES';
 var PAGE_RULE_CONSUMED_MSG = 'AI_REQ_ANALYZER_RULE_CONSUMED';
@@ -107,6 +108,19 @@ var state = {
   uiReady: false,
   menuReady: false,
   mcpTools: {},
+  flows: {},
+  activeFlowId: null,
+  flowRecording: false,
+  activeFlowLastStepId: null,
+  activeFlowLastActionAt: 0,
+  flowUi: {
+    selectedFlowId: null,
+    selectedStepId: null,
+    filterClassification: 'all'
+  },
+  recordingTrayVisible: false,
+  recordingTrayEl: null,
+  activeFlowRecordingSignatures: null,
   mcpPanelTab: 'list',
   listFilters: {
     dupOnly: false,
@@ -160,4 +174,89 @@ function saveMockRules() {
   normalizeAllRules();
   storageSet(key, JSON.stringify(state.mockRules));
   syncMockRulesToPage();
+}
+
+function getFlowsKey(hostname) {
+  return FLOWS_KEY_PREFIX + (hostname || location.hostname);
+}
+
+function ensureFlowState() {
+  if (!state.flows || typeof state.flows !== 'object') state.flows = {};
+  if (!state.flowUi || typeof state.flowUi !== 'object') {
+    state.flowUi = {
+      selectedFlowId: null,
+      selectedStepId: null,
+      filterClassification: 'all'
+    };
+  }
+  if (!state.flowUi.filterClassification) state.flowUi.filterClassification = 'all';
+}
+
+function loadFlows() {
+  ensureFlowState();
+  try {
+    var saved = storageGet(getFlowsKey(), null);
+    if (saved) {
+      var parsed = JSON.parse(saved);
+      state.flows = parsed && typeof parsed === 'object' ? parsed : {};
+    }
+  } catch (e) {
+    state.flows = {};
+  }
+}
+
+function saveFlows() {
+  ensureFlowState();
+  storageSet(getFlowsKey(), JSON.stringify(state.flows || {}));
+}
+
+function createFlow(name) {
+  ensureFlowState();
+  var id = 'flow_' + Date.now().toString(36) + '_' + Math.random().toString(36).substr(2, 6);
+  var flow = {
+    id: id,
+    name: name || '未命名流程',
+    hostname: location.hostname,
+    startedAt: Date.now(),
+    endedAt: null,
+    steps: [],
+    verifiedRequestIds: [],
+    classifications: {},
+    requestMeta: {},
+    manualVerificationOverrides: {},
+    notes: '',
+    mcpToolNames: []
+  };
+  state.flows[id] = flow;
+  state.activeFlowId = id;
+  state.flowRecording = true;
+  state.activeFlowLastStepId = null;
+  state.activeFlowLastActionAt = 0;
+  state.activeFlowRecordingSignatures = {};
+  state.flowUi.selectedFlowId = id;
+  state.flowUi.selectedStepId = null;
+  saveFlows();
+  return flow;
+}
+
+function getActiveFlow() {
+  ensureFlowState();
+  if (!state.activeFlowId) return null;
+  return state.flows[state.activeFlowId] || null;
+}
+
+function finishFlow(flowId) {
+  ensureFlowState();
+  var id = flowId || state.activeFlowId;
+  if (!id || !state.flows[id]) return null;
+  state.flows[id].endedAt = Date.now();
+  if (state.activeFlowId === id) {
+    state.flowRecording = false;
+    state.activeFlowId = null;
+    state.activeFlowLastStepId = null;
+    state.activeFlowLastActionAt = 0;
+    state.activeFlowRecordingSignatures = null;
+  }
+  saveFlows();
+  return state.flows[id];
 }
