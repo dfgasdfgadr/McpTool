@@ -117,12 +117,12 @@ MCP 工具的描述会使用 AI 分析结果，建议先配置 AI：
 ### 4.4 启动 MCP Server
 
 1. 在「MCP 工具」标签页中，点击状态栏右侧的「启动」按钮
-2. 状态从「○ 未启动」变为「● 已启动 ws://localhost:9527」
+2. 状态从「○ 未启动」变为「● 已启动 http://127.0.0.1:9527/mcp」（需通过 HTTP 健康检查后才显示已启动）
 3. 点击「停止」可关闭 MCP Server
 
 启动成功后，MCP Helper 进程：
 - 通过 Native Messaging 与扩展建立连接
-- 在 `ws://localhost:{port}/mcp` 启动 WebSocket 服务
+- 在 `http://127.0.0.1:{port}/mcp` 提供 Streamable HTTP MCP 服务（亦兼容 WebSocket）
 - 自动同步当前所有启用的 MCP 工具
 
 ### 4.5 配置 MCP 客户端
@@ -136,8 +136,7 @@ MCP 工具的描述会使用 AI 分析结果，建议先配置 AI：
 {
   "mcpServers": {
     "ai-request-analyzer": {
-      "url": "ws://localhost:9527/mcp",
-      "transport": "websocket"
+      "url": "http://127.0.0.1:9527/mcp"
     }
   }
 }
@@ -150,8 +149,7 @@ MCP 工具的描述会使用 AI 分析结果，建议先配置 AI：
 {
   "mcpServers": {
     "ai-request-analyzer": {
-      "url": "ws://localhost:9527/mcp",
-      "transport": "websocket"
+      "url": "http://127.0.0.1:9527/mcp"
     }
   }
 }
@@ -159,7 +157,7 @@ MCP 工具的描述会使用 AI 分析结果，建议先配置 AI：
 
 **Cline / 其他 MCP 客户端**：
 
-参照各客户端文档，添加 WebSocket 类型的 MCP Server，地址为 `ws://localhost:9527/mcp`。
+参照各客户端文档，添加 MCP Server，地址为 `http://127.0.0.1:9527/mcp`（Cursor 使用 Streamable HTTP；部分客户端仍支持 `ws://127.0.0.1:9527/mcp`）。
 
 如配置了 Token 鉴权（见 4.6），需要在客户端配置中添加 Token。
 
@@ -187,7 +185,7 @@ export MCP_AUTH_TOKEN="your-secret-token"
 
 1. 右键页面 → 点击「配置」
 2. 在「MCP Server 配置」区域修改端口号
-3. 重新启动 MCP Server
+3. 重新启动 MCP Server，并**同步修改 Cursor 等客户端**中的 MCP URL 端口
 
 或通过命令行参数：
 ```bash
@@ -258,10 +256,11 @@ AI 调用流程：
 
 ### Q：MCP 客户端连接不上？
 
-1. 确认面板状态栏显示「● 已启动」
+1. 确认面板状态栏显示「● 已启动 http://127.0.0.1:…/mcp」（若显示「Helper 已连接，HTTP 未就绪」，说明 Native Messaging 正常但 HTTP 未监听，请检查端口占用或重新启动）
 2. 确认端口未被其他程序占用（默认 9527）
-3. 确认客户端配置的地址为 `ws://localhost:9527/mcp`（注意包含 `/mcp` 路径）
-4. 如配置了 Token 鉴权，确认客户端配置了正确的 Token
+3. 确认客户端配置的地址为 `http://127.0.0.1:9527/mcp`（注意包含 `/mcp` 路径，端口与插件配置一致）
+4. 可在浏览器或终端访问 `http://127.0.0.1:9527/health` 验证 Helper 是否就绪（应返回 `{"ok":true,...}`）
+5. 如配置了 Token 鉴权，确认客户端配置了正确的 Token
 
 ### Q：AI 调用工具返回 "Tool not found"？
 
@@ -303,6 +302,6 @@ AI 调用流程：
 | API Key | 配置面板 | 空 | AI 分析的 API 密钥 |
 | Base URL | 配置面板 | `https://api.moonshot.cn/v1` | AI API 地址 |
 | Model | 配置面板 | `kimi-k2.6` | AI 模型名称 |
-| MCP Server 端口 | 配置面板 | `9527` | WebSocket 监听端口 |
+| MCP Server 端口 | 配置面板 | `9527` | HTTP MCP 监听端口 |
 | MCP 鉴权 Token | 配置面板 | 空 | 留空表示不鉴权 |
 | 自动同步 | 配置面板 | `false` | 工具变更后是否自动同步 |

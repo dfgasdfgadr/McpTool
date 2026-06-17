@@ -82,10 +82,158 @@ function toggleMainPanel() {
   }
 }
 
+var PANEL_LAYOUT_STORAGE_KEY = 'ai_req_panel_layout_mode';
+
 function ensureMainUiState() {
   if (!state.ui || typeof state.ui !== 'object') state.ui = {};
   if (!state.ui.activeMainTab) state.ui.activeMainTab = 'requests';
   if (typeof state.ui.requestKeyword !== 'string') state.ui.requestKeyword = '';
+  if (!state.ui.layoutMode) {
+    var savedLayout = storageGet(getScopedStorageKey(PANEL_LAYOUT_STORAGE_KEY), null);
+    state.ui.layoutMode = savedLayout === 'wide' ? 'wide' : 'compact';
+  }
+  if (!state.ui.requestTable || typeof state.ui.requestTable !== 'object') {
+    state.ui.requestTable = {};
+  }
+  if (state.ui.requestTable.selectedId == null && state.expandedReqId) {
+    state.ui.requestTable.selectedId = state.expandedReqId;
+    state.ui.requestTable.detailOpen = true;
+  }
+  if (typeof state.ui.requestTable.detailOpen !== 'boolean') {
+    state.ui.requestTable.detailOpen = !!state.ui.requestTable.selectedId;
+  }
+}
+
+function extractRequestPath(url) {
+  try {
+    var u = new URL(url);
+    return u.pathname + (u.search || '');
+  } catch (e) {
+    return url || '';
+  }
+}
+
+function countDuplicateRequests(records) {
+  var mp = duplicateSignatureCounts(records || []);
+  var dup = 0;
+  for (var i = 0; i < (records || []).length; i++) {
+    var sig = computeRequestSignature(records[i]);
+    if ((mp[sig] || 0) > 1) dup++;
+  }
+  return dup;
+}
+
+function syncRequestInspectorVisibility() {
+  if (!state.mainPanel) return;
+  ensureMainUiState();
+  var panel = state.mainPanel;
+  var inspector = panel.querySelector('.ai-req-request-inspector');
+  var split = panel.querySelector('.ai-req-request-split');
+  if (!inspector || !split) return;
+  var selId = state.ui.requestTable.selectedId;
+  var open = !!state.ui.requestTable.detailOpen && !!selId;
+  var isWide = state.ui.layoutMode === 'wide';
+  split.setAttribute('data-inspector-open', open ? '1' : '0');
+  split.setAttribute('data-has-selection', selId ? '1' : '0');
+  inspector.style.display = open ? 'flex' : 'none';
+  inspector.classList.toggle('ai-req-inspector-overlay', open && !isWide);
+  split.classList.toggle('ai-req-split-has-inspector', open && isWide);
+}
+
+function restorePanelCompactPosition(panel) {
+  var savedPos = storageGet(getScopedStorageKey('ai_req_panel_position'), null);
+  if (savedPos) {
+    try {
+      var pos = clampPosition(JSON.parse(savedPos), 420, 620);
+      panel.style.left = pos.left + 'px';
+      panel.style.top = pos.top + 'px';
+      panel.style.right = 'auto';
+      panel.style.bottom = 'auto';
+      return;
+    } catch (e) {}
+  }
+  panel.style.left = 'auto';
+  panel.style.right = '90px';
+  panel.style.top = 'auto';
+  panel.style.bottom = '20px';
+}
+
+function applyPanelLayoutMode(panel) {
+  if (!panel) panel = state.mainPanel;
+  if (!panel) return;
+  ensureMainUiState();
+  var mode = state.ui.layoutMode === 'wide' ? 'wide' : 'compact';
+  panel.setAttribute('data-ai-req-layout', mode);
+  var layoutBtn = panel.querySelector('.ai-req-layout-toggle-btn');
+  if (layoutBtn) {
+    layoutBtn.title = mode === 'wide' ? '切换紧凑浮层' : '切换宽屏工作台';
+    layoutBtn.setAttribute('aria-pressed', mode === 'wide' ? 'true' : 'false');
+    layoutBtn.textContent = mode === 'wide' ? '\u229F' : '\u2922';
+  }
+  if (mode === 'wide') {
+    panel.style.right = 'auto';
+    panel.style.bottom = 'auto';
+    panel.style.left = '50%';
+    panel.style.top = '50%';
+    panel.style.transform = 'translate(-50%, -50%)';
+    if (state.ui.requestTable && state.ui.requestTable.selectedId) {
+      state.ui.requestTable.detailOpen = true;
+    }
+  } else {
+    panel.style.transform = '';
+    restorePanelCompactPosition(panel);
+  }
+  syncRequestInspectorVisibility();
+  var mcpContent = panel.querySelector('.ai-req-mcp-content');
+  if (mcpContent && typeof syncMcpInspectorVisibility === 'function') {
+    if (mode === 'wide' && state.mcpListUi && state.mcpListUi.selectedToolName) {
+      state.mcpListUi.inspectorOpen = true;
+    }
+    syncMcpInspectorVisibility(mcpContent);
+  }
+  if (mcpContent && typeof syncMcpLogInspectorLayout === 'function') {
+    syncMcpLogInspectorLayout(mcpContent);
+  }
+}
+
+function togglePanelLayoutMode() {
+  ensureMainUiState();
+  state.ui.layoutMode = state.ui.layoutMode === 'wide' ? 'compact' : 'wide';
+  storageSet(getScopedStorageKey(PANEL_LAYOUT_STORAGE_KEY), state.ui.layoutMode);
+  applyPanelLayoutMode();
+}
+
+function syncShellChrome() {
+  if (!state.mainPanel) return;
+  var panel = state.mainPanel;
+  var hostEl = panel.querySelector('.ai-req-shell-host');
+  if (hostEl) {
+    hostEl.textContent = typeof location !== 'undefined' ? location.hostname : '';
+  }
+  var reqEl = panel.querySelector('.ai-req-shell-req-count');
+  if (reqEl) {
+    var records = state.requestRecords || [];
+    var analyzed = 0;
+    for (var ri = 0; ri < records.length; ri++) {
+      if (records[ri].aiAnalysis) analyzed++;
+    }
+    reqEl.textContent = records.length + ' 请求' + (analyzed ? ' · 已分析 ' + analyzed : '');
+  }
+  var mcpEl = panel.querySelector('.ai-req-shell-mcp-status');
+  if (mcpEl && typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
+    chrome.runtime.sendMessage({ type: 'MCP_GET_STATUS' }, function (resp) {
+      if (!mcpEl) return;
+      if (resp && resp.helperConnected) {
+        mcpEl.textContent = 'MCP 已连接';
+        mcpEl.classList.add('ai-req-shell-mcp-on');
+        mcpEl.classList.remove('ai-req-shell-mcp-off');
+      } else {
+        mcpEl.textContent = 'MCP 未启动';
+        mcpEl.classList.add('ai-req-shell-mcp-off');
+        mcpEl.classList.remove('ai-req-shell-mcp-on');
+      }
+    });
+  }
 }
 
 function setMainWorkbenchTab(tabName) {
@@ -97,13 +245,13 @@ function setMainWorkbenchTab(tabName) {
   refreshMainWorkbench();
 }
 
-function refreshMainTabButtons() {
+function refreshMainNavButtons() {
   if (!state.mainPanel) return;
   ensureMainUiState();
-  var tabs = state.mainPanel.querySelectorAll('.ai-req-main-tab');
+  var tabs = state.mainPanel.querySelectorAll('.ai-req-nav-item');
   for (var i = 0; i < tabs.length; i++) {
     var active = tabs[i].getAttribute('data-main-tab') === state.ui.activeMainTab;
-    tabs[i].classList.toggle('ai-req-main-tab-active', active);
+    tabs[i].classList.toggle('ai-req-nav-item-active', active);
     tabs[i].setAttribute('aria-selected', active ? 'true' : 'false');
   }
 }
@@ -112,7 +260,9 @@ function refreshMainWorkbench() {
   if (!state.mainPanel) return;
   ensureMainUiState();
   state.mainPanel.setAttribute('data-ai-req-tab', state.ui.activeMainTab);
-  refreshMainTabButtons();
+  applyPanelLayoutMode(state.mainPanel);
+  refreshMainNavButtons();
+  syncShellChrome();
   if (state.ui.activeMainTab === 'requests') {
     refreshRequestList(undefined, true);
   } else if (state.ui.activeMainTab === 'mcp') {
@@ -123,13 +273,21 @@ function refreshMainWorkbench() {
   }
 }
 
-function createMainTabButton(tabName, label) {
+function createMainNavButton(tabName, label, shortLabel) {
   var btn = document.createElement('button');
   btn.type = 'button';
-  btn.className = 'ai-req-main-tab';
+  btn.className = 'ai-req-nav-item';
   btn.setAttribute('data-main-tab', tabName);
   btn.setAttribute('role', 'tab');
-  btn.textContent = label;
+  btn.title = label;
+  var shortEl = document.createElement('span');
+  shortEl.className = 'ai-req-nav-short';
+  shortEl.textContent = shortLabel || label.charAt(0);
+  var labelEl = document.createElement('span');
+  labelEl.className = 'ai-req-nav-label';
+  labelEl.textContent = label;
+  btn.appendChild(shortEl);
+  btn.appendChild(labelEl);
   btn.addEventListener('click', function () {
     setMainWorkbenchTab(tabName);
   });
@@ -155,23 +313,64 @@ function createMainPanel() {
     panel.style.bottom = '20px';
   }
 
+  ensureMainUiState();
+  panel.setAttribute('data-ai-req-tab', state.ui.activeMainTab);
+  panel.setAttribute('data-ai-req-layout', state.ui.layoutMode === 'wide' ? 'wide' : 'compact');
+
   var header = document.createElement('div');
   header.className = 'ai-req-panel-header';
 
+  var brand = document.createElement('div');
+  brand.className = 'ai-req-panel-brand';
+  var brandDot = document.createElement('span');
+  brandDot.className = 'ai-req-panel-brand-dot';
   var title = document.createElement('div');
   title.className = 'ai-req-panel-title';
   title.textContent = 'AI请求分析助手';
+  brand.appendChild(brandDot);
+  brand.appendChild(title);
+
+  var meta = document.createElement('div');
+  meta.className = 'ai-req-shell-meta';
+  var hostMeta = document.createElement('span');
+  hostMeta.className = 'ai-req-shell-host';
+  hostMeta.textContent = typeof location !== 'undefined' ? location.hostname : '';
+  var reqMeta = document.createElement('span');
+  reqMeta.className = 'ai-req-shell-req-count';
+  reqMeta.textContent = '0 请求';
+  var mcpMeta = document.createElement('span');
+  mcpMeta.className = 'ai-req-shell-mcp-status ai-req-shell-mcp-off';
+  mcpMeta.textContent = 'MCP 未启动';
+  meta.appendChild(hostMeta);
+  meta.appendChild(reqMeta);
+  meta.appendChild(mcpMeta);
+
+  var headerActions = document.createElement('div');
+  headerActions.className = 'ai-req-panel-actions';
+
+  var layoutBtn = document.createElement('button');
+  layoutBtn.type = 'button';
+  layoutBtn.className = 'ai-req-panel-btn ai-req-layout-toggle-btn';
+  layoutBtn.textContent = '\u2922';
+  layoutBtn.title = '切换宽屏工作台';
+  layoutBtn.setAttribute('aria-pressed', 'false');
+  layoutBtn.addEventListener('click', function (e) {
+    e.stopPropagation();
+    togglePanelLayoutMode();
+  });
 
   var configBtn = document.createElement('button');
+  configBtn.type = 'button';
   configBtn.className = 'ai-req-panel-btn';
   configBtn.textContent = '\u2699';
-  configBtn.title = '配置';
+  configBtn.title = '设置';
   configBtn.addEventListener('click', function (e) {
     e.stopPropagation();
     setMainWorkbenchTab('settings');
   });
 
   var closeBtn = document.createElement('button');
+  closeBtn.type = 'button';
   closeBtn.className = 'ai-req-panel-btn';
   closeBtn.textContent = '\u2715';
   closeBtn.title = '关闭';
@@ -181,16 +380,26 @@ function createMainPanel() {
     panel.style.display = 'none';
   });
 
-  header.appendChild(title);
-  header.appendChild(configBtn);
-  header.appendChild(closeBtn);
+  headerActions.appendChild(layoutBtn);
+  headerActions.appendChild(configBtn);
+  headerActions.appendChild(closeBtn);
 
-  var mainTabs = document.createElement('div');
-  mainTabs.className = 'ai-req-main-tabs';
-  mainTabs.setAttribute('role', 'tablist');
-  mainTabs.appendChild(createMainTabButton('requests', '\u8BF7\u6C42\u5DE5\u4F5C\u53F0'));
-  mainTabs.appendChild(createMainTabButton('mcp', 'MCP \u5DE5\u4F5C\u53F0'));
-  mainTabs.appendChild(createMainTabButton('settings', '\u8BBE\u7F6E'));
+  header.appendChild(brand);
+  header.appendChild(meta);
+  header.appendChild(headerActions);
+
+  var shellBody = document.createElement('div');
+  shellBody.className = 'ai-req-shell-body';
+
+  var navRail = document.createElement('div');
+  navRail.className = 'ai-req-nav-rail';
+  navRail.setAttribute('role', 'tablist');
+  navRail.appendChild(createMainNavButton('requests', '\u8BF7\u6C42', 'REQ'));
+  navRail.appendChild(createMainNavButton('mcp', 'MCP', 'MCP'));
+  navRail.appendChild(createMainNavButton('settings', '\u8BBE\u7F6E', 'SET'));
+
+  var workbenchStage = document.createElement('div');
+  workbenchStage.className = 'ai-req-workbench-stage';
 
   var searchBox = document.createElement('div');
   searchBox.className = 'ai-req-search-box';
@@ -340,12 +549,62 @@ function createMainPanel() {
 
   var progressBar = document.createElement('div');
   progressBar.className = 'ai-req-progress-bar';
+  var taskStrip = document.createElement('div');
+  taskStrip.className = 'ai-req-task-strip';
+  taskStrip.style.display = 'none';
   var progressFill = document.createElement('div');
   progressFill.className = 'ai-req-progress-fill';
   progressBar.appendChild(progressFill);
 
+  var requestSummary = document.createElement('div');
+  requestSummary.className = 'ai-req-request-summary';
+
+  var requestSplit = document.createElement('div');
+  requestSplit.className = 'ai-req-request-split';
+
+  var tablePane = document.createElement('div');
+  tablePane.className = 'ai-req-request-table-pane';
+
+  var tableHead = document.createElement('div');
+  tableHead.className = 'ai-req-request-table-head';
+  tableHead.innerHTML = '' +
+    '<span class="ai-req-th ai-req-th-cb"></span>' +
+    '<span class="ai-req-th ai-req-th-method">方法</span>' +
+    '<span class="ai-req-th ai-req-th-path">路径</span>' +
+    '<span class="ai-req-th ai-req-th-status">状态</span>' +
+    '<span class="ai-req-th ai-req-th-time">耗时</span>' +
+    '<span class="ai-req-th ai-req-th-flags">标记</span>';
+
   var requestList = document.createElement('div');
   requestList.className = 'ai-req-request-list';
+
+  var requestInspector = document.createElement('div');
+  requestInspector.className = 'ai-req-request-inspector';
+  requestInspector.style.display = 'none';
+  var inspectorHeader = document.createElement('div');
+  inspectorHeader.className = 'ai-req-request-inspector-header';
+  var inspectorTitle = document.createElement('span');
+  inspectorTitle.className = 'ai-req-request-inspector-title';
+  inspectorTitle.textContent = '请求详情';
+  var inspectorClose = document.createElement('button');
+  inspectorClose.type = 'button';
+  inspectorClose.className = 'ai-req-panel-btn ai-req-inspector-close-btn';
+  inspectorClose.textContent = '\u2715';
+  inspectorClose.title = '关闭详情';
+  inspectorClose.addEventListener('click', function (e) {
+    e.stopPropagation();
+    ensureMainUiState();
+    state.ui.requestTable.detailOpen = false;
+    state.expandedReqId = null;
+    syncRequestInspectorVisibility();
+    refreshRequestList(getActiveListKeyword(), true);
+  });
+  inspectorHeader.appendChild(inspectorTitle);
+  inspectorHeader.appendChild(inspectorClose);
+  var inspectorBody = document.createElement('div');
+  inspectorBody.className = 'ai-req-request-inspector-body';
+  requestInspector.appendChild(inspectorHeader);
+  requestInspector.appendChild(inspectorBody);
 
   var mainBody = document.createElement('div');
   mainBody.className = 'ai-req-main-body';
@@ -357,8 +616,12 @@ function createMainPanel() {
     '<button type="button" class="ai-req-btn ai-req-btn-secondary" data-bulk-act="bulk-ai">\u6279\u91CF AI\u5206\u6790</button>' +
     '<button type="button" class="ai-req-btn ai-req-btn-secondary" data-bulk-act="bulk-mcp-selected">\u5DF2\u9009\u2192MCP</button>' +
     '<button type="button" class="ai-req-btn ai-req-btn-secondary" data-bulk-act="clear-selection">\u6E05\u7A7A\u9009\u62E9</button>';
-  mainBody.appendChild(bulkBarReq);
-  mainBody.appendChild(requestList);
+  tablePane.appendChild(bulkBarReq);
+  tablePane.appendChild(tableHead);
+  tablePane.appendChild(requestList);
+  requestSplit.appendChild(tablePane);
+  requestSplit.appendChild(requestInspector);
+  mainBody.appendChild(requestSplit);
 
   var bottomInput = document.createElement('div');
   bottomInput.className = 'ai-req-bottom-input';
@@ -404,7 +667,9 @@ function createMainPanel() {
   requestPane.appendChild(searchBox);
   requestPane.appendChild(filterBar);
   requestPane.appendChild(actionBar);
+  requestPane.appendChild(taskStrip);
   requestPane.appendChild(progressBar);
+  requestPane.appendChild(requestSummary);
   requestPane.appendChild(mainBody);
   requestPane.appendChild(bottomInput);
 
@@ -430,24 +695,41 @@ function createMainPanel() {
     '    <div class="ai-req-settings-title">MCP Server 配置</div>' +
     '    <label class="ai-req-settings-field"><span>MCP 端口</span><input type="number" min="1" max="65535" class="ai-req-settings-input ai-req-settings-mcp-port" placeholder="9527"></label>' +
     '    <label class="ai-req-settings-field"><span>鉴权 Token</span><input type="password" class="ai-req-settings-input ai-req-settings-mcp-token" placeholder="可选，用于 MCP 连接鉴权"></label>' +
-    '    <label class="ai-req-settings-field"><span>MCP 工具命名</span><select class="ai-req-settings-input ai-req-settings-mcp-tool-naming"><option value="full">完整路径（默认）</option><option value="compact">紧凑（末段+哈希）</option></select></label>' +
     '    <label class="ai-req-settings-check"><input type="checkbox" class="ai-req-settings-mcp-auto-sync"> 启动时自动同步工具列表</label>' +
+    '  </div>' +
+    '  <div class="ai-req-settings-section">' +
+    '    <div class="ai-req-settings-title">工具生成配置</div>' +
+    '    <label class="ai-req-settings-field"><span>MCP 工具命名</span><select class="ai-req-settings-input ai-req-settings-mcp-tool-naming"><option value="full">完整路径（默认）</option><option value="compact">紧凑（末段+哈希）</option></select></label>' +
+    '    <label class="ai-req-settings-check"><input type="checkbox" class="ai-req-settings-enhanced-gen"> 增强 MCP 推断（非一键默认路径）</label>' +
+    '    <div class="ai-req-settings-hint">与请求工作台的「增强 MCP 推断」开关同步；影响视图内/已选生成时的推断策略。</div>' +
+    '  </div>' +
+    '  <div class="ai-req-settings-section">' +
+    '    <div class="ai-req-settings-title">导入导出配置</div>' +
     '    <label class="ai-req-settings-field"><span>MCP 导出目录（本机）</span><input type="text" class="ai-req-settings-input ai-req-settings-mcp-export-path" placeholder="D:\\\\exports\\\\mcp 或 /home/user/mcp-export"></label>' +
     '    <div class="ai-req-settings-hint">导出目录非空且 MCP 助手已启动时，会优先写入本机目录；否则使用浏览器下载。</div>' +
     '  </div>' +
+    '  <div class="ai-req-settings-section ai-req-settings-danger">' +
+    '    <div class="ai-req-settings-title">危险区</div>' +
+    '    <div class="ai-req-settings-hint ai-req-settings-danger-hint">以下操作仅影响当前站点（' + (typeof location !== 'undefined' ? location.hostname : '') + '），不可撤销。</div>' +
+    '    <button type="button" class="ai-req-btn ai-req-btn-danger ai-req-settings-clear-rules">清除全部调试规则</button>' +
+    '  </div>' +
     '</div>' +
     '<div class="ai-req-settings-actions">' +
-    '  <button type="button" class="ai-req-btn ai-req-btn-secondary ai-req-settings-open-legacy">打开浮层配置</button>' +
+    '  <button type="button" class="ai-req-btn ai-req-btn-secondary ai-req-settings-open-legacy" title="兼容旧版浮层配置">打开浮层配置</button>' +
     '  <button type="button" class="ai-req-btn ai-req-btn-primary ai-req-settings-save">保存设置</button>' +
     '</div>';
 
+  workbenchStage.appendChild(requestPane);
+  workbenchStage.appendChild(mcpPane);
+  workbenchStage.appendChild(settingsPane);
+  shellBody.appendChild(navRail);
+  shellBody.appendChild(workbenchStage);
+
   panel.appendChild(header);
-  panel.appendChild(mainTabs);
-  panel.appendChild(requestPane);
-  panel.appendChild(mcpPane);
-  panel.appendChild(settingsPane);
+  panel.appendChild(shellBody);
 
   makeDraggable(panel, header);
+  applyPanelLayoutMode(panel);
 
   safeAppendChild(panel);
   state.mainPanel = panel;
@@ -477,6 +759,19 @@ function hydrateSettingsWorkbench() {
   setVal('.ai-req-settings-mcp-tool-naming', cfg.mcpToolNaming === 'compact' ? 'compact' : 'full');
   setChecked('.ai-req-settings-mcp-auto-sync', !!cfg.mcpAutoSync);
   setVal('.ai-req-settings-mcp-export-path', cfg.mcpExportPath || '');
+  setChecked('.ai-req-settings-enhanced-gen', !!state.mcpUseEnhancedGeneration);
+  var reqEnhCb = panel.querySelector('.ai-req-enhanced-gen-cb');
+  if (reqEnhCb) reqEnhCb.checked = !!state.mcpUseEnhancedGeneration;
+}
+
+function syncEnhancedGenCheckboxes(panel, checked) {
+  var root = panel || state.mainPanel;
+  if (!root) return;
+  state.mcpUseEnhancedGeneration = !!checked;
+  var settingsCb = root.querySelector('.ai-req-settings-enhanced-gen');
+  var reqCb = root.querySelector('.ai-req-enhanced-gen-cb');
+  if (settingsCb) settingsCb.checked = !!checked;
+  if (reqCb) reqCb.checked = !!checked;
 }
 
 function saveSettingsWorkbench(panel) {
@@ -499,8 +794,9 @@ function saveSettingsWorkbench(panel) {
   state.config.mcpToolNaming = val('.ai-req-settings-mcp-tool-naming') === 'compact' ? 'compact' : 'full';
   state.config.mcpAutoSync = checked('.ai-req-settings-mcp-auto-sync');
   state.config.mcpExportPath = val('.ai-req-settings-mcp-export-path');
+  syncEnhancedGenCheckboxes(root, checked('.ai-req-settings-enhanced-gen'));
   saveConfig();
-  showToast('设置已保存');
+  showToast('设置已保存', 2500, 'success');
 }
 
 function bindSettingsWorkbench(panel) {
@@ -516,6 +812,18 @@ function bindSettingsWorkbench(panel) {
       openConfigPanel();
     });
   }
+  var clearRulesBtn = panel.querySelector('.ai-req-settings-clear-rules');
+  if (clearRulesBtn) {
+    clearRulesBtn.addEventListener('click', function () {
+      clearAllMockRules();
+    });
+  }
+  var enhCb = panel.querySelector('.ai-req-settings-enhanced-gen');
+  if (enhCb) {
+    enhCb.addEventListener('change', function () {
+      syncEnhancedGenCheckboxes(panel, enhCb.checked);
+    });
+  }
 }
 
 function makeDraggable(element, handle) {
@@ -525,6 +833,8 @@ function makeDraggable(element, handle) {
 
   handle.addEventListener('mousedown', function (e) {
     if (e.target.tagName === 'BUTTON') return;
+    ensureMainUiState();
+    if (state.ui.layoutMode === 'wide') return;
     isDragging = true;
     hasDragged = false;
     startX = e.clientX;
@@ -575,71 +885,6 @@ function getActiveListKeyword() {
   return kw;
 }
 
-function stableSortedJsonValue(val) {
-  if (val === null || val === undefined) return JSON.stringify(val);
-  if (typeof val !== 'object') return JSON.stringify(val);
-  if (Array.isArray(val)) {
-    return '[' + val.map(function (item) {
-      return stableSortedJsonValue(item);
-    }).join(',') + ']';
-  }
-  var keys = Object.keys(val).sort();
-  var parts = [];
-  for (var k = 0; k < keys.length; k++) {
-    parts.push(JSON.stringify(keys[k]) + ':' + stableSortedJsonValue(val[keys[k]]));
-  }
-  return '{' + parts.join(',') + '}';
-}
-
-function stableQueryFingerprint(urlStr) {
-  try {
-    var parsed = new URL(urlStr);
-    var keys = [];
-    parsed.searchParams.forEach(function (_, kk) {
-      if (keys.indexOf(kk) === -1) keys.push(kk);
-    });
-    keys.sort();
-    var pairs = [];
-    for (var i = 0; i < keys.length; i++) {
-      pairs.push(keys[i] + '=' + parsed.searchParams.get(keys[i]));
-    }
-    return pairs.join('&');
-  } catch (e) {
-    return '';
-  }
-}
-
-function fingerprintBody(body) {
-  if (body == null || body === '') return '';
-  if (typeof body === 'string') {
-    var t = body.trim();
-    if (!t) return '';
-    var parsed = tryParseJson(t);
-    if (parsed !== t && parsed && typeof parsed === 'object') {
-      return stableSortedJsonValue(parsed);
-    }
-    return t;
-  }
-  if (typeof body === 'object') {
-    return stableSortedJsonValue(body);
-  }
-  return String(body);
-}
-
-function computeRequestSignature(rec) {
-  var method = (rec.method || 'GET').toUpperCase();
-  var urlStr = rec.originalUrl || rec.url || '';
-  var pathnameKey = '';
-  try {
-    pathnameKey = getMockKey(urlStr);
-  } catch (ex) {
-    pathnameKey = urlStr;
-  }
-  var qfp = stableQueryFingerprint(urlStr);
-  var bfp = fingerprintBody(rec.requestBody);
-  return method + '\n' + pathnameKey + '\n' + qfp + '\n' + bfp;
-}
-
 function duplicateSignatureCounts(records) {
   var mp = {};
   for (var i = 0; i < records.length; i++) {
@@ -673,6 +918,11 @@ function removeDuplicateRequestRecordsBySignature() {
     if (removedIds[id]) delete state.selectedReqIds[id];
   }
   if (state.selectedReqId && removedIds[state.selectedReqId]) state.selectedReqId = null;
+  if (state.ui && state.ui.requestTable && state.ui.requestTable.selectedId && removedIds[state.ui.requestTable.selectedId]) {
+    state.ui.requestTable.selectedId = null;
+    state.ui.requestTable.detailOpen = false;
+    state.expandedReqId = null;
+  }
   if (state.selectedRewriteReqId && removedIds[state.selectedRewriteReqId]) state.selectedRewriteReqId = null;
   return removed;
 }
@@ -872,7 +1122,7 @@ function wireReqFilterInteractionsOnce(panel) {
       refreshRequestList(undefined, false);
     }
     if (evc.target && evc.target.classList && evc.target.classList.contains('ai-req-enhanced-gen-cb')) {
-      state.mcpUseEnhancedGeneration = !!evc.target.checked;
+      syncEnhancedGenCheckboxes(panel, evc.target.checked);
     }
   });
 
@@ -911,9 +1161,72 @@ function wireReqFilterInteractionsOnce(panel) {
   }
 }
 
+function findRequestById(reqId) {
+  for (var i = 0; i < state.requestRecords.length; i++) {
+    if (state.requestRecords[i].id === reqId) return state.requestRecords[i];
+  }
+  return null;
+}
+
+function renderRequestSummary(filtered) {
+  if (!state.mainPanel) return;
+  var el = state.mainPanel.querySelector('.ai-req-request-summary');
+  if (!el) return;
+  var analyzed = 0;
+  var mocked = 0;
+  for (var i = 0; i < filtered.length; i++) {
+    if (filtered[i].aiAnalysis) analyzed++;
+    if (recordShowsMocked(filtered[i])) mocked++;
+  }
+  var dupCount = countDuplicateRequests(state.requestRecords);
+  var sel = selectionCountRequests();
+  el.innerHTML = '';
+  var stats = [
+    { label: '显示', value: filtered.length },
+    { label: '已分析', value: analyzed },
+    { label: 'Mock', value: mocked },
+    { label: '重复', value: dupCount },
+    { label: '已选', value: sel }
+  ];
+  for (var s = 0; s < stats.length; s++) {
+    var chip = document.createElement('span');
+    chip.className = 'ai-req-summary-chip';
+    var lbl = document.createElement('span');
+    lbl.className = 'ai-req-summary-label';
+    lbl.textContent = stats[s].label;
+    var val = document.createElement('span');
+    val.className = 'ai-req-summary-value';
+    val.textContent = String(stats[s].value);
+    chip.appendChild(lbl);
+    chip.appendChild(val);
+    el.appendChild(chip);
+  }
+}
+
+function renderRequestInspector(req, kwEffective) {
+  if (!state.mainPanel) return;
+  var body = state.mainPanel.querySelector('.ai-req-request-inspector-body');
+  var titleEl = state.mainPanel.querySelector('.ai-req-request-inspector-title');
+  if (!body) return;
+  if (!req) {
+    if (titleEl) titleEl.textContent = '请求详情';
+    body.innerHTML = '<div class="ai-req-inspector-empty">选择一条请求查看详情</div>';
+    return;
+  }
+  if (titleEl) {
+    titleEl.textContent = (req.method || 'GET') + ' ' + extractRequestPath(req.url);
+  }
+  body.innerHTML = buildDetailHTML(req);
+  bindDetailEvents(body, req, kwEffective);
+}
+
 function appendRequestRowToList(listElInner, req, kwEffective) {
+  ensureMainUiState();
+  var selectedId = state.ui.requestTable.selectedId;
+
   var itemInner = document.createElement('div');
   itemInner.className = 'ai-req-request-item';
+  if (selectedId === req.id) itemInner.classList.add('ai-req-request-selected');
   itemInner.setAttribute('data-id', req.id);
 
   var rowWrap = document.createElement('div');
@@ -942,10 +1255,11 @@ function appendRequestRowToList(listElInner, req, kwEffective) {
   methodTag2.className = 'ai-req-method-tag ai-req-method-' + getMethodClass(req.method);
   methodTag2.textContent = req.method;
 
-  var urlText2 = document.createElement('span');
-  urlText2.className = 'ai-req-url-text';
-  urlText2.textContent = truncateURL(req.url, 60);
-  urlText2.title = req.url;
+  var pathText = document.createElement('span');
+  pathText.className = 'ai-req-path-text';
+  var pathStr = extractRequestPath(req.url);
+  pathText.textContent = truncateURL(pathStr, 48);
+  pathText.title = req.url;
 
   var statusCode2 = document.createElement('span');
   statusCode2.className = 'ai-req-status-code ' + getStatusClass(req.responseStatus);
@@ -955,49 +1269,52 @@ function appendRequestRowToList(listElInner, req, kwEffective) {
   duration2.className = 'ai-req-duration';
   duration2.textContent = req.duration + 'ms';
 
+  var flagsWrap = document.createElement('span');
+  flagsWrap.className = 'ai-req-row-flags';
+
   var aiIcon2 = document.createElement('span');
   aiIcon2.className = 'ai-req-icon-indicator ' + (req.aiAnalysis ? 'ai-req-ai-analyzed' : 'ai-req-ai-not-analyzed');
-  aiIcon2.textContent = req.aiAnalysis ? '\u2713' : '\u25CB';
-  aiIcon2.title = req.aiAnalysis ? '\u5DF2AI\u5206\u6790' : '\u672AAI\u5206\u6790';
+  aiIcon2.textContent = req.aiAnalysis ? 'AI' : '-';
+  aiIcon2.title = req.aiAnalysis ? '已AI分析' : '未AI分析';
 
   var mockShown = recordShowsMocked(req);
   var mockIcon2 = document.createElement('span');
   mockIcon2.className = 'ai-req-icon-indicator ' + (mockShown ? 'ai-req-mock-active' : 'ai-req-mock-inactive');
-  mockIcon2.textContent = mockShown ? '\u25CF' : '\u25CB';
-  mockIcon2.title = mockShown ? '\u5DF2Mock' : '\u672AMock';
+  mockIcon2.textContent = mockShown ? 'M' : '-';
+  mockIcon2.title = mockShown ? '已Mock' : '未Mock';
 
   var activeRule2 = req.debugRule || findDebugRule(req.originalUrl || req.url, req.method);
   var tags2 = buildDebugTagElement(activeRule2);
 
+  flagsWrap.appendChild(aiIcon2);
+  flagsWrap.appendChild(mockIcon2);
+  if (tags2) flagsWrap.appendChild(tags2);
+
   rowInner.appendChild(methodTag2);
-  rowInner.appendChild(urlText2);
+  rowInner.appendChild(pathText);
   rowInner.appendChild(statusCode2);
   rowInner.appendChild(duration2);
-  rowInner.appendChild(aiIcon2);
-  rowInner.appendChild(mockIcon2);
-  if (tags2) rowInner.appendChild(tags2);
+  rowInner.appendChild(flagsWrap);
 
   rowInner.addEventListener('click', function () {
-    if (state.expandedReqId === req.id) {
-      state.expandedReqId = null;
+    ensureMainUiState();
+    var sid = state.ui.requestTable.selectedId;
+    if (sid === req.id) {
+      if (state.ui.layoutMode !== 'wide') {
+        state.ui.requestTable.detailOpen = !state.ui.requestTable.detailOpen;
+      }
     } else {
-      state.expandedReqId = req.id;
+      state.ui.requestTable.selectedId = req.id;
+      state.ui.requestTable.detailOpen = true;
+      state.selectedReqId = req.id;
     }
+    state.expandedReqId = state.ui.requestTable.detailOpen ? req.id : null;
     refreshRequestList(kwEffective, true);
   });
 
   rowWrap.appendChild(cbCell);
   rowWrap.appendChild(rowInner);
   itemInner.appendChild(rowWrap);
-
-  if (state.expandedReqId === req.id) {
-    var detail2 = document.createElement('div');
-    detail2.className = 'ai-req-request-detail';
-    detail2.innerHTML = buildDetailHTML(req);
-    itemInner.appendChild(detail2);
-    bindDetailEvents(detail2, req, kwEffective);
-  }
-
   listElInner.appendChild(itemInner);
 }
 
@@ -1021,15 +1338,40 @@ function refreshRequestList(keyword, skipPruneSel) {
     pruneSelectedReqIdsToMatchRecords(filtered);
   }
 
+  var selId = state.ui.requestTable.selectedId;
+  if (selId) {
+    var stillThere = false;
+    for (var si = 0; si < filtered.length; si++) {
+      if (filtered[si].id === selId) {
+        stillThere = true;
+        break;
+      }
+    }
+    if (!stillThere) {
+      state.ui.requestTable.selectedId = null;
+      state.ui.requestTable.detailOpen = false;
+      state.expandedReqId = null;
+      selId = null;
+    }
+  }
+
   var bulkBarOuter = state.mainPanel.querySelector('.ai-req-req-bulk-bar');
   if (bulkBarOuter) {
     var bn = selectionCountRequests();
     bulkBarOuter.style.display = bn > 0 ? 'flex' : 'none';
     var spn = bulkBarOuter.querySelector('.ai-req-req-bulk-count');
-    if (spn) spn.textContent = '\u5DF2\u9009 ' + bn;
+    if (spn) spn.textContent = '已选 ' + bn;
   }
 
-  countEl.textContent = filtered.length + ' \u8BF7\u6C42';
+  countEl.textContent = filtered.length + ' 请求';
+  renderRequestSummary(filtered);
+  syncShellChrome();
+
+  var tableHead = state.mainPanel.querySelector('.ai-req-request-table-head');
+  if (tableHead) {
+    var showHead = state.ui.layoutMode === 'wide' || filtered.length > 0;
+    tableHead.style.display = showHead ? 'flex' : 'none';
+  }
 
   if (filtered.length === 0) {
     var empty = document.createElement('div');
@@ -1037,9 +1379,11 @@ function refreshRequestList(keyword, skipPruneSel) {
     var lf0 = state.listFilters || {};
     var hasExtras = !!(kwEffective || lf0.dupOnly || lf0.mock !== 'all' || lf0.analyzed !== 'all');
     empty.textContent = hasExtras ?
-      '\u6CA1\u6709\u5339\u914D\u7684\u8BF7\u6C42' :
-      '\u6682\u65E0\u8BF7\u6C42\u8BB0\u5F55';
+      '没有匹配的请求' :
+      '暂无请求记录';
     listEl.appendChild(empty);
+    renderRequestInspector(null, kwEffective);
+    syncRequestInspectorVisibility();
     return;
   }
 
@@ -1061,7 +1405,7 @@ function refreshRequestList(keyword, skipPruneSel) {
     refreshRequestList(kwEffective, true);
   });
   cbAllLbl.appendChild(cbAll);
-  cbAllLbl.appendChild(document.createTextNode(' \u5168\u9009\u5F53\u524D'));
+  cbAllLbl.appendChild(document.createTextNode(' 全选当前'));
   selectStrip.appendChild(cbAllLbl);
   listEl.appendChild(selectStrip);
 
@@ -1081,11 +1425,21 @@ function refreshRequestList(keyword, skipPruneSel) {
       var gnk = grp.keys[gi];
       var headEl = document.createElement('div');
       headEl.className = 'ai-req-group-header';
-      headEl.textContent = gnk + ' \uFF08' + grp.map[gnk].length + '\u6761\uFF09';
+      headEl.textContent = gnk + ' （' + grp.map[gnk].length + '条）';
       listEl.appendChild(headEl);
       renderSubset(grp.map[gnk]);
     }
   }
+
+  var selectedReq = selId ? findRequestById(selId) : null;
+  if (state.ui.layoutMode === 'wide' && selectedReq) {
+    state.ui.requestTable.detailOpen = true;
+  }
+  renderRequestInspector(
+    state.ui.requestTable.detailOpen ? selectedReq : null,
+    kwEffective
+  );
+  syncRequestInspectorVisibility();
 }
 
 function getMethodClass(method) {
@@ -1293,20 +1647,19 @@ function bindDetailEvents(detailEl, req, keyword) {
 }
 
 function renderRequestDetail(reqId) {
-  var itemEl = state.mainPanel.querySelector('.ai-req-request-item[data-id="' + reqId + '"]');
-  if (!itemEl) return;
-  var req = null;
-  for (var i = 0; i < state.requestRecords.length; i++) {
-    if (state.requestRecords[i].id === reqId) {
-      req = state.requestRecords[i];
-      break;
-    }
+  var req = findRequestById(reqId);
+  if (!req || !state.mainPanel) return;
+  ensureMainUiState();
+  state.ui.requestTable.selectedId = reqId;
+  state.ui.requestTable.detailOpen = true;
+  state.expandedReqId = reqId;
+  state.selectedReqId = reqId;
+  renderRequestInspector(req, getActiveListKeyword());
+  syncRequestInspectorVisibility();
+  var items = state.mainPanel.querySelectorAll('.ai-req-request-item');
+  for (var i = 0; i < items.length; i++) {
+    items[i].classList.toggle('ai-req-request-selected', items[i].getAttribute('data-id') === reqId);
   }
-  if (!req) return;
-  var detailEl = itemEl.querySelector('.ai-req-request-detail');
-  if (!detailEl) return;
-  detailEl.innerHTML = buildDetailHTML(req);
-  bindDetailEvents(detailEl, req, getActiveListKeyword());
 }
 
 function openJsonEditor(data) {
@@ -1549,12 +1902,13 @@ function createRewriteEditor() {
   state.rewriteEditor = editor;
 }
 
-function showToast(msg, duration) {
+function showToast(msg, duration, type) {
   duration = duration || 2500;
+  type = type || 'success';
   var existing = document.querySelector('.ai-req-toast');
   if (existing) existing.remove();
   var toast = document.createElement('div');
-  toast.className = 'ai-req-toast';
+  toast.className = 'ai-req-toast ai-req-toast-' + type;
   toast.textContent = msg;
   safeAppendChild(toast);
   requestAnimationFrame(function () {
@@ -1564,6 +1918,71 @@ function showToast(msg, duration) {
     toast.classList.remove('ai-req-toast-show');
     setTimeout(function () { toast.remove(); }, 300);
   }, duration);
+}
+
+function confirmDangerAction(opts) {
+  opts = opts || {};
+  var existingOverlays = document.querySelectorAll('.ai-req-confirm-overlay');
+  for (var ei = 0; ei < existingOverlays.length; ei++) {
+    existingOverlays[ei].remove();
+  }
+  return new Promise(function (resolve) {
+    var settled = false;
+    var overlay = document.createElement('div');
+    overlay.className = 'ai-req-confirm-overlay';
+    var modal = document.createElement('div');
+    modal.className = 'ai-req-confirm-modal ai-req-confirm-danger';
+    var titleEl = document.createElement('div');
+    titleEl.className = 'ai-req-confirm-title';
+    titleEl.textContent = opts.title || '确认危险操作';
+    var bodyEl = document.createElement('div');
+    bodyEl.className = 'ai-req-confirm-body';
+    bodyEl.textContent = opts.message || '';
+    var actions = document.createElement('div');
+    actions.className = 'ai-req-confirm-actions';
+    var cancelBtn = document.createElement('button');
+    cancelBtn.type = 'button';
+    cancelBtn.className = 'ai-req-btn ai-req-btn-secondary ai-req-confirm-cancel';
+    cancelBtn.textContent = opts.cancelLabel || '取消';
+    var okBtn = document.createElement('button');
+    okBtn.type = 'button';
+    okBtn.className = 'ai-req-btn ai-req-btn-danger ai-req-confirm-ok';
+    okBtn.textContent = opts.confirmLabel || '确认执行';
+    function closeModal(result) {
+      if (settled) return;
+      settled = true;
+      overlay.remove();
+      resolve(result);
+    }
+    cancelBtn.addEventListener('click', function (e) {
+      e.stopPropagation();
+      closeModal(false);
+    });
+    okBtn.addEventListener('click', function (e) {
+      e.stopPropagation();
+      closeModal(true);
+    });
+    modal.addEventListener('click', function (e) {
+      e.stopPropagation();
+    });
+    overlay.addEventListener('click', function (e) {
+      if (e.target === overlay) closeModal(false);
+    });
+    actions.appendChild(cancelBtn);
+    actions.appendChild(okBtn);
+    modal.appendChild(titleEl);
+    modal.appendChild(bodyEl);
+    modal.appendChild(actions);
+    overlay.appendChild(modal);
+    if (state.mainPanel && state.mainPanel.parentNode) {
+      state.mainPanel.appendChild(overlay);
+    } else {
+      safeAppendChild(overlay);
+    }
+    requestAnimationFrame(function () {
+      okBtn.focus();
+    });
+  });
 }
 
 function replayRequest(reqId) {
@@ -1624,23 +2043,26 @@ function removeMockRule(req) {
 function clearAllMockRules() {
   var mockCount = Object.keys(state.mockRules || {}).length;
   if (mockCount === 0) {
-    showToast('当前没有调试规则');
+    showToast('当前没有调试规则', 2500, 'info');
     return;
   }
-
-  if (!confirm('确定清除当前站点下的全部 ' + mockCount + ' 条调试规则吗？')) {
-    return;
-  }
-
-  state.mockRules = {};
-  saveMockRules();
-  state.requestRecords.forEach(function (req) {
-    req.isMocked = false;
-    req.mockData = null;
-    req.debugRule = null;
+  var host = typeof location !== 'undefined' ? location.hostname : '当前站点';
+  confirmDangerAction({
+    title: '清除全部调试规则',
+    message: '将清除「' + host + '」下全部 ' + mockCount + ' 条 Mock/改写规则。所有已配置的响应替换与高级改写将失效，且不可撤销。',
+    confirmLabel: '清除 ' + mockCount + ' 条规则'
+  }).then(function (ok) {
+    if (!ok) return;
+    state.mockRules = {};
+    saveMockRules();
+    state.requestRecords.forEach(function (req) {
+      req.isMocked = false;
+      req.mockData = null;
+      req.debugRule = null;
+    });
+    refreshRequestList();
+    showToast('已清除全部调试规则', 2500, 'success');
   });
-  refreshRequestList();
-  showToast('已清除全部调试规则');
 }
 
 function openConfigPanel() {
@@ -1783,16 +2205,31 @@ function createConfigPanel() {
 }
 
 function updateAnalyzeProgress() {
+  if (!state.mainPanel) return;
   var fill = state.mainPanel.querySelector('.ai-req-progress-fill');
   var countEl = state.mainPanel.querySelector('.ai-req-req-count');
+  var taskStrip = state.mainPanel.querySelector('.ai-req-task-strip');
+  var progressBar = state.mainPanel.querySelector('.ai-req-progress-bar');
   if (state.isAnalyzing) {
     var pct = state.analyzeProgress.total > 0 ? (state.analyzeProgress.done / state.analyzeProgress.total * 100) : 0;
-    fill.style.width = pct + '%';
-    countEl.textContent = '\u5206\u6790\u4E2D ' + state.analyzeProgress.done + '/' + state.analyzeProgress.total;
+    if (fill) fill.style.width = pct + '%';
+    if (progressBar) progressBar.classList.add('ai-req-progress-active');
+    if (taskStrip) {
+      taskStrip.style.display = 'block';
+      taskStrip.textContent = 'AI 批量分析中 ' + state.analyzeProgress.done + ' / ' + state.analyzeProgress.total;
+    }
+    if (countEl) countEl.textContent = '分析中 ' + state.analyzeProgress.done + '/' + state.analyzeProgress.total;
   } else {
-    fill.style.width = '0%';
-    var total = state.requestRecords.length;
-    var analyzed = state.requestRecords.filter(function (r) { return r.aiAnalysis !== null; }).length;
-    countEl.textContent = total + ' \u8BF7\u6C42 (\u5DF2\u5206\u6790' + analyzed + ')';
+    if (fill) fill.style.width = '0%';
+    if (progressBar) progressBar.classList.remove('ai-req-progress-active');
+    if (taskStrip) {
+      taskStrip.style.display = 'none';
+      taskStrip.textContent = '';
+    }
+    if (countEl) {
+      var filtered = filterRequestRecords(state.requestRecords, getActiveListKeyword());
+      countEl.textContent = filtered.length + ' 请求';
+    }
   }
+  syncShellChrome();
 }

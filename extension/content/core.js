@@ -71,10 +71,85 @@ function tryParseJson(str) {
   }
 }
 
+function stableSortedJsonValue(val) {
+  if (val === null || val === undefined) return JSON.stringify(val);
+  if (typeof val !== 'object') return JSON.stringify(val);
+  if (Array.isArray(val)) {
+    return '[' + val.map(function (item) {
+      return stableSortedJsonValue(item);
+    }).join(',') + ']';
+  }
+  var keys = Object.keys(val).sort();
+  var parts = [];
+  for (var k = 0; k < keys.length; k++) {
+    parts.push(JSON.stringify(keys[k]) + ':' + stableSortedJsonValue(val[keys[k]]));
+  }
+  return '{' + parts.join(',') + '}';
+}
+
+function stableQueryFingerprint(urlStr) {
+  try {
+    var parsed = new URL(urlStr);
+    var keys = [];
+    parsed.searchParams.forEach(function (_, kk) {
+      if (keys.indexOf(kk) === -1) keys.push(kk);
+    });
+    keys.sort();
+    var pairs = [];
+    for (var i = 0; i < keys.length; i++) {
+      pairs.push(keys[i] + '=' + parsed.searchParams.get(keys[i]));
+    }
+    return pairs.join('&');
+  } catch (e) {
+    return '';
+  }
+}
+
+function fingerprintBody(body) {
+  if (body == null || body === '') return '';
+  if (typeof body === 'string') {
+    var t = body.trim();
+    if (!t) return '';
+    var parsed = tryParseJson(t);
+    if (parsed !== t && parsed && typeof parsed === 'object') {
+      return stableSortedJsonValue(parsed);
+    }
+    return t;
+  }
+  if (typeof body === 'object') {
+    return stableSortedJsonValue(body);
+  }
+  return String(body);
+}
+
+function computeRequestSignature(rec) {
+  var method = (rec.method || 'GET').toUpperCase();
+  var urlStr = rec.originalUrl || rec.url || '';
+  var pathnameKey = '';
+  try {
+    pathnameKey = getMockKey(urlStr);
+  } catch (ex) {
+    pathnameKey = urlStr;
+  }
+  var qfp = stableQueryFingerprint(urlStr);
+  var bfp = fingerprintBody(rec.requestBody);
+  return method + '\n' + pathnameKey + '\n' + qfp + '\n' + bfp;
+}
+
+function isDuplicateRequestRecord(record) {
+  var sig = computeRequestSignature(record);
+  var records = state.requestRecords || [];
+  for (var i = 0; i < records.length; i++) {
+    if (computeRequestSignature(records[i]) === sig) return true;
+  }
+  return false;
+}
+
 function addRequestRecord(record) {
   if (record.debugRule) {
     record.debugRule = normalizeRule(record.debugRule, getMockKey(record.originalUrl || record.url), record.method);
   }
+  if (isDuplicateRequestRecord(record)) return;
   state.requestRecords.push(record);
   if (state.requestRecords.length > MAX_RECORDS) {
     state.requestRecords.shift();
@@ -445,11 +520,6 @@ function setupMenuCommands() {
   state.menuReady = true;
 
   chrome.runtime.onMessage.addListener(function (msg, _sender, sendResponse) {
-    if (msg && msg.type === 'MCP_PROXY_REQUEST') {
-      handleMcpProxyRequest(msg.payload, sendResponse);
-      return true;
-    }
-
     if (!msg || msg.type !== 'AI_REQ_ANALYZER_MENU') return;
 
     if (msg.action === 'diagnostics') {
@@ -507,3 +577,10 @@ function setupMenuCommands() {
     return false;
   });
 }
+
+chrome.runtime.onMessage.addListener(function (msg, _sender, sendResponse) {
+  if (msg && msg.type === 'MCP_PROXY_REQUEST') {
+    handleMcpProxyRequest(msg.payload, sendResponse);
+    return true;
+  }
+});

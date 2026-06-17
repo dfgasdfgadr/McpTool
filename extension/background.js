@@ -147,11 +147,11 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
   }
 
   if (message.type === 'MCP_START_HELPER') {
-    var cfgPort = (message.payload && message.payload.mcpPort) || 9527;
+    var cfgPort = normalizeMcpPort(message.payload && message.payload.mcpPort);
     mcpState.serverPort = cfgPort;
     connectMcpHelper(function (result) {
       sendResponse(result);
-    });
+    }, { port: cfgPort });
     return true;
   }
 
@@ -163,7 +163,7 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
 
   if (message.type === 'MCP_SYNC_TOOLS') {
     syncToolsToHelper();
-    sendResponse({ ok: true, synced: mcpState.helperConnected });
+    sendResponse({ ok: true, synced: mcpState.helperConnected && mcpState.httpReady });
     return true;
   }
 
@@ -232,11 +232,18 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
   }
 
   if (message.type === 'MCP_GET_STATUS') {
+    var statusPort = mcpState.serverPort || 9527;
     sendResponse({
       helperConnected: mcpState.helperConnected,
-      serverPort: mcpState.serverPort,
+      httpReady: mcpState.httpReady,
+      serverPort: statusPort,
+      helperError: mcpState.helperError,
+      httpError: mcpState.httpError,
+      lastHealthAt: mcpState.lastHealthAt,
+      toolCount: mcpState.toolCount,
+      serverStarting: mcpState.serverStarting,
       callLogCount: mcpState.callLogs.length,
-      helperError: mcpState.helperError
+      mcpUrl: buildMcpUrl(statusPort)
     });
     return true;
   }
@@ -288,6 +295,7 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
     var testToolName = message.toolName;
     var testArgs = message.arguments || {};
     var testStartTime = Date.now();
+    var senderTab = sender && sender.tab ? sender.tab : null;
 
     chrome.storage.local.get(null, function (items) {
       var toolDef = null;
@@ -312,58 +320,17 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
         return;
       }
 
-      var origin = toolMeta.origin || '';
-      if (!/^https?:\/\//i.test(origin) && matchedStorageHost) {
-        origin = 'https://' + matchedStorageHost;
-      }
-      var method = toolMeta.method || 'GET';
-      var execHeaders = toolMeta.rawRequestHeaders || toolMeta.sampleRequestHeaders || {};
+      var origin = resolveToolOrigin(toolMeta, matchedStorageHost, senderTab);
+      var built = buildMcpProxyPayload('test_' + Date.now(), testToolName, toolMeta, testArgs);
+      var fullUrl = origin + built.pathname + built.queryString;
 
-      var partedTest = partitionMcpToolArguments(toolMeta, testArgs);
-      var pathname = partedTest.pathname;
+      findBestTabForProxy(origin, fullUrl, built.pathname).then(function (tab) {
+        var tabCandidates = [];
+        if (senderTab && typeof senderTab.id !== 'undefined') tabCandidates.push(senderTab);
+        if (tab && (!senderTab || tab.id !== senderTab.id)) tabCandidates.push(tab);
 
-      var queryString = '';
-      var bodyData = {};
-      var argKeys = Object.keys(partedTest.restArgs);
-      for (var ai = 0; ai < argKeys.length; ai++) {
-        var argKey = argKeys[ai];
-        if (argKey.charAt(0) === '_') continue;
-        var isInQuery = toolMeta.queryParams && toolMeta.queryParams.indexOf(argKey) >= 0;
-        if (isInQuery || method.toUpperCase() === 'GET') {
-          queryString += (queryString ? '&' : '?') + encodeURIComponent(argKey) + '=' + encodeURIComponent(String(partedTest.restArgs[argKey]));
-        } else {
-          bodyData[argKey] = partedTest.restArgs[argKey];
-        }
-      }
-
-      var fullUrl = origin + pathname + queryString;
-
-      findBestTabForProxy(origin, fullUrl, pathname).then(function (tab) {
-        if (tab) {
-          var proxyUrlTest = rewriteMcpProxyUrlForTab(tab, fullUrl);
-          var proxyPayload = {
-            callId: 'test_' + Date.now(),
-            toolName: testToolName,
-            url: proxyUrlTest,
-            method: method,
-            headers: execHeaders,
-            body: bodyData,
-            timeout: 30000
-          };
-          chrome.tabs.sendMessage(tab.id, { type: 'MCP_PROXY_REQUEST', payload: proxyPayload }, function (response) {
-            addMcpCallLog({
-              timestamp: Date.now(),
-              toolName: testToolName,
-              argsSummary: JSON.stringify(testArgs).substring(0, 200),
-              status: (response && response.status) || 0,
-              duration: Date.now() - testStartTime,
-              proxyMode: 'test-tab',
-              error: (response && response.error) || null
-            });
-            sendResponse(response || { ok: false, error: 'No response from content script' });
-          });
-        } else {
-          fallbackFetch(toolMeta, fullUrl, method, execHeaders, bodyData).then(function (fbResult) {
+        if (!tabCandidates.length) {
+          fallbackFetch(toolMeta, fullUrl, built.method, built.execHeaders, built.bodyData).then(function (fbResult) {
             addMcpCallLog({
               timestamp: Date.now(),
               toolName: testToolName,
@@ -377,7 +344,36 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
           }).catch(function (err) {
             sendResponse({ ok: false, error: err && err.message ? err.message : String(err) });
           });
+          return;
         }
+
+        dispatchMcpProxyViaTabs(tabCandidates, built.payload, fullUrl, function (response, errMsg) {
+          if (!response) {
+            fallbackFetch(toolMeta, fullUrl, built.method, built.execHeaders, built.bodyData).then(function (fbResult) {
+              addMcpCallLog({
+                timestamp: Date.now(),
+                toolName: testToolName,
+                argsSummary: JSON.stringify(testArgs).substring(0, 200),
+                status: fbResult.status || 0,
+                duration: Date.now() - testStartTime,
+                proxyMode: 'test-fallback',
+                error: fbResult.error || errMsg || null
+              });
+              sendResponse(fbResult);
+            });
+            return;
+          }
+          addMcpCallLog({
+            timestamp: Date.now(),
+            toolName: testToolName,
+            argsSummary: JSON.stringify(testArgs).substring(0, 200),
+            status: response.status || 0,
+            duration: Date.now() - testStartTime,
+            proxyMode: response.proxyMode || 'test-tab',
+            error: response.error || null
+          });
+          sendResponse(response);
+        });
       });
     });
 
@@ -443,14 +439,65 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
 
 var mcpState = {
   helperConnected: false,
+  httpReady: false,
   helperPort: null,
   helperError: null,
+  httpError: null,
+  lastHealthAt: 0,
+  toolCount: 0,
+  serverStarting: false,
   helperStopping: false,
   tools: {},
   callLogs: [],
   pendingCalls: {},
   serverPort: 9527
 };
+
+function normalizeMcpPort(n) {
+  var p = parseInt(n, 10);
+  if (!isFinite(p) || p < 1 || p > 65535) return 9527;
+  return p;
+}
+
+function buildMcpUrl(port) {
+  return 'http://127.0.0.1:' + normalizeMcpPort(port) + '/mcp';
+}
+
+function probeMcpHealth(port, callback) {
+  var schedule = [200, 500, 1000];
+  var idx = 0;
+
+  function attempt() {
+    fetch('http://127.0.0.1:' + port + '/health')
+      .then(function (res) {
+        return res.json().then(function (data) {
+          if (res.ok && data && data.ok) {
+            callback({
+              ok: true,
+              tools: typeof data.tools === 'number' ? data.tools : 0,
+              port: data.port || port
+            });
+          } else {
+            retryOrFail('invalid health response');
+          }
+        });
+      })
+      .catch(function (err) {
+        retryOrFail(err && err.message ? err.message : 'connection refused');
+      });
+  }
+
+  function retryOrFail(errMsg) {
+    idx++;
+    if (idx >= schedule.length) {
+      callback({ ok: false, error: 'HTTP 健康检查失败: ' + errMsg });
+      return;
+    }
+    setTimeout(attempt, schedule[idx]);
+  }
+
+  setTimeout(attempt, schedule[0]);
+}
 
 /** LIST_EXPORT_DIR / READ_EXPORT_FILE / WRITE_EXPORT_FILE Native Messaging RPC pending by requestId */
 var nmExportRpcPending = {};
@@ -548,27 +595,91 @@ function mergeAllMcpToolsFromStorage(items) {
   };
 }
 
-function connectMcpHelper() {
-  var onDone = arguments[0];
+function connectMcpHelper(onDone, options) {
+  options = options || {};
+  var targetPort = normalizeMcpPort(options.port != null ? options.port : mcpState.serverPort);
+  mcpState.serverPort = targetPort;
   var settled = false;
   var connectTimeout = null;
+  var startServerTimeout = null;
+  var awaitingServerStart = false;
 
   function finish(result) {
     if (settled) return;
     settled = true;
     if (connectTimeout) clearTimeout(connectTimeout);
+    if (startServerTimeout) clearTimeout(startServerTimeout);
+    mcpState.serverStarting = false;
     if (typeof onDone === 'function') onDone(result);
+  }
+
+  function beginStartServer() {
+    awaitingServerStart = true;
+    mcpState.serverStarting = true;
+    try {
+      mcpState.helperPort.postMessage({ type: 'START_SERVER', port: targetPort });
+    } catch (eStart) {
+      mcpState.helperError = eStart && eStart.message ? eStart.message : 'START_SERVER 发送失败';
+      finish({ ok: false, connected: false, error: mcpState.helperError });
+      return;
+    }
+    startServerTimeout = setTimeout(function () {
+      if (settled) return;
+      mcpState.httpReady = false;
+      mcpState.httpError = '启动 HTTP 服务超时';
+      finish({ ok: false, connected: false, error: mcpState.httpError });
+    }, 3000);
+  }
+
+  function onServerStarted(msg) {
+    if (settled || !awaitingServerStart) return;
+    if (startServerTimeout) clearTimeout(startServerTimeout);
+    awaitingServerStart = false;
+    mcpState.serverPort = normalizeMcpPort(msg.port != null ? msg.port : targetPort);
+    probeMcpHealth(mcpState.serverPort, function (health) {
+      if (health.ok) {
+        mcpState.httpReady = true;
+        mcpState.httpError = null;
+        mcpState.toolCount = health.tools;
+        mcpState.lastHealthAt = Date.now();
+        syncToolsToHelper();
+        finish({
+          ok: true,
+          connected: true,
+          httpReady: true,
+          serverPort: mcpState.serverPort,
+          mcpUrl: buildMcpUrl(mcpState.serverPort)
+        });
+      } else {
+        mcpState.httpReady = false;
+        mcpState.httpError = health.error || 'HTTP 健康检查失败';
+        finish({ ok: false, connected: false, httpReady: false, error: mcpState.httpError });
+      }
+    });
+  }
+
+  function onServerStartFailed(msg) {
+    if (settled || !awaitingServerStart) return;
+    if (startServerTimeout) clearTimeout(startServerTimeout);
+    awaitingServerStart = false;
+    mcpState.httpReady = false;
+    mcpState.httpError = msg.error || 'HTTP 服务启动失败';
+    finish({ ok: false, connected: false, error: mcpState.httpError });
   }
 
   disconnectMcpHelper();
   mcpState.helperConnected = false;
+  mcpState.httpReady = false;
+  mcpState.httpError = null;
   mcpState.helperError = null;
   mcpState.helperStopping = false;
+  mcpState.serverStarting = true;
 
   try {
     mcpState.helperPort = chrome.runtime.connectNative('com.aireq.mcp_helper');
   } catch (e) {
     mcpState.helperConnected = false;
+    mcpState.serverStarting = false;
     mcpState.helperError = e && e.message ? e.message : 'Native Messaging Host 启动失败';
     finish({ ok: false, connected: false, error: mcpState.helperError });
     return;
@@ -577,6 +688,7 @@ function connectMcpHelper() {
   connectTimeout = setTimeout(function () {
     if (settled) return;
     mcpState.helperConnected = false;
+    mcpState.serverStarting = false;
     mcpState.helperError = 'Native Messaging Host 未响应，请确认已执行 install.mjs 并重启浏览器';
     disconnectMcpHelper();
     finish({ ok: false, connected: false, error: mcpState.helperError });
@@ -606,10 +718,18 @@ function connectMcpHelper() {
       return;
     }
     if (msg && msg.type === 'PONG') {
+      if (connectTimeout) clearTimeout(connectTimeout);
       mcpState.helperConnected = true;
       mcpState.helperError = null;
-      syncToolsToHelper();
-      finish({ ok: true, connected: true, serverPort: mcpState.serverPort });
+      beginStartServer();
+      return;
+    }
+    if (msg && msg.type === 'SERVER_STARTED') {
+      onServerStarted(msg);
+      return;
+    }
+    if (msg && msg.type === 'SERVER_START_FAILED') {
+      onServerStartFailed(msg);
       return;
     }
     handleHelperMessage(msg);
@@ -619,21 +739,26 @@ function connectMcpHelper() {
     var lastError = chrome.runtime.lastError ? chrome.runtime.lastError.message : '';
     flushNmExportRpcPending(lastError || 'Native Messaging \u5DF2\u65AD\u5F00');
     mcpState.helperConnected = false;
+    mcpState.httpReady = false;
     mcpState.helperPort = null;
+    mcpState.serverStarting = false;
     if (mcpState.helperStopping) {
       mcpState.helperStopping = false;
       mcpState.helperError = null;
       finish({ ok: false, connected: false, error: null });
       return;
     }
-    mcpState.helperError = lastError || 'Native Messaging Host 已断开';
-    finish({ ok: false, connected: false, error: mcpState.helperError });
+    if (!settled) {
+      mcpState.helperError = lastError || 'Native Messaging Host 已断开';
+      finish({ ok: false, connected: false, error: mcpState.helperError });
+    }
   });
 
   try {
     mcpState.helperPort.postMessage({ type: 'PING' });
   } catch (e2) {
     mcpState.helperConnected = false;
+    mcpState.serverStarting = false;
     mcpState.helperError = e2 && e2.message ? e2.message : 'Native Messaging Host 通信失败';
     disconnectMcpHelper();
     finish({ ok: false, connected: false, error: mcpState.helperError });
@@ -645,12 +770,20 @@ function disconnectMcpHelper() {
   if (mcpState.helperPort) {
     mcpState.helperStopping = true;
     try {
+      mcpState.helperPort.postMessage({ type: 'STOP_SERVER' });
+    } catch (eStop) {}
+    try {
       mcpState.helperPort.postMessage({ type: 'SHUTDOWN' });
     } catch (e) {}
     mcpState.helperPort.disconnect();
     mcpState.helperPort = null;
   }
   mcpState.helperConnected = false;
+  mcpState.httpReady = false;
+  mcpState.httpError = null;
+  mcpState.lastHealthAt = 0;
+  mcpState.toolCount = 0;
+  mcpState.serverStarting = false;
   mcpState.helperError = null;
 }
 
@@ -727,6 +860,100 @@ function findTargetTab(origin) {
       resolve(tabs[0]);
     });
   });
+}
+
+function resolveToolOrigin(toolMeta, matchedStorageHost, preferredTab) {
+  var origin = (toolMeta && toolMeta.origin) || '';
+  if (/^https?:\/\//i.test(origin)) return origin;
+  if (preferredTab && preferredTab.url) {
+    try {
+      return new URL(preferredTab.url).origin;
+    } catch (eTab) {}
+  }
+  if (matchedStorageHost) return 'https://' + matchedStorageHost;
+  return '';
+}
+
+function sendMcpProxyToTab(tabId, proxyPayload, callback) {
+  chrome.tabs.sendMessage(tabId, { type: 'MCP_PROXY_REQUEST', payload: proxyPayload }, function (response) {
+    var lastErr = chrome.runtime.lastError;
+    if (lastErr) {
+      callback(null, lastErr.message || 'content script 无响应');
+      return;
+    }
+    if (!response) {
+      callback(null, 'No response from content script');
+      return;
+    }
+    callback(response, null);
+  });
+}
+
+function dispatchMcpProxyViaTabs(tabCandidates, proxyPayload, fullUrl, onResult) {
+  var idx = 0;
+  function tryNext(errMsg) {
+    if (idx >= tabCandidates.length) {
+      onResult(null, errMsg || 'content script 无响应');
+      return;
+    }
+    var tab = tabCandidates[idx];
+    idx++;
+    if (!tab || typeof tab.id === 'undefined') {
+      tryNext(errMsg);
+      return;
+    }
+    var payload = {};
+    var pk;
+    for (pk in proxyPayload) {
+      if (Object.prototype.hasOwnProperty.call(proxyPayload, pk)) payload[pk] = proxyPayload[pk];
+    }
+    payload.url = rewriteMcpProxyUrlForTab(tab, fullUrl);
+    sendMcpProxyToTab(tab.id, payload, function (response, error) {
+      if (response) {
+        onResult(response, null);
+        return;
+      }
+      tryNext(error || errMsg);
+    });
+  }
+  tryNext(null);
+}
+
+function buildMcpProxyPayload(callId, toolName, toolMeta, toolArguments) {
+  var parted = partitionMcpToolArguments(toolMeta, toolArguments || {});
+  var pathname = parted.pathname;
+  var method = toolMeta.method || 'GET';
+  var execHeaders = toolMeta.rawRequestHeaders || toolMeta.sampleRequestHeaders || {};
+  var queryString = '';
+  var bodyData = {};
+  var argKeys = Object.keys(parted.restArgs);
+  var ai;
+  for (ai = 0; ai < argKeys.length; ai++) {
+    var argKey = argKeys[ai];
+    if (argKey.charAt(0) === '_') continue;
+    var isInQuery = toolMeta.queryParams && toolMeta.queryParams.indexOf(argKey) >= 0;
+    if (isInQuery || method.toUpperCase() === 'GET') {
+      queryString += (queryString ? '&' : '?') + encodeURIComponent(argKey) + '=' + encodeURIComponent(String(parted.restArgs[argKey]));
+    } else {
+      bodyData[argKey] = parted.restArgs[argKey];
+    }
+  }
+  return {
+    pathname: pathname,
+    method: method,
+    execHeaders: execHeaders,
+    bodyData: bodyData,
+    queryString: queryString,
+    payload: {
+      callId: callId,
+      toolName: toolName,
+      url: '',
+      method: method,
+      headers: execHeaders,
+      body: bodyData,
+      timeout: 30000
+    }
+  };
 }
 
 function fallbackFetch(toolMeta, url, method, headers, body) {
@@ -808,46 +1035,14 @@ function handleMcpToolCall(callId, toolName, toolArguments) {
       return;
     }
 
-    var origin = toolMeta.origin || '';
-    if (!/^https?:\/\//i.test(origin) && matchedStorageHost) {
-      origin = 'https://' + matchedStorageHost;
-    }
-    var method = toolMeta.method || 'GET';
-    var execHeaders = toolMeta.rawRequestHeaders || toolMeta.sampleRequestHeaders || {};
+    var origin = resolveToolOrigin(toolMeta, matchedStorageHost, null);
+    var built = buildMcpProxyPayload(callId, toolName, toolMeta, toolArguments);
+    var fullUrl = origin + built.pathname + built.queryString;
 
-    var partedCall = partitionMcpToolArguments(toolMeta, toolArguments);
-    var pathname = partedCall.pathname;
-
-    var queryString = '';
-    var bodyData = {};
-    var argKeys = Object.keys(partedCall.restArgs);
-    for (var ai = 0; ai < argKeys.length; ai++) {
-      var argKey = argKeys[ai];
-      if (argKey.charAt(0) === '_') continue;
-      var isInQuery = toolMeta.queryParams && toolMeta.queryParams.indexOf(argKey) >= 0;
-      if (isInQuery || method.toUpperCase() === 'GET') {
-        queryString += (queryString ? '&' : '?') + encodeURIComponent(argKey) + '=' + encodeURIComponent(String(partedCall.restArgs[argKey]));
-      } else {
-        bodyData[argKey] = partedCall.restArgs[argKey];
-      }
-    }
-
-    var fullUrl = origin + pathname + queryString;
-
-    findBestTabForProxy(origin, fullUrl, pathname).then(function (tab) {
+    findBestTabForProxy(origin, fullUrl, built.pathname).then(function (tab) {
       if (tab) {
-        var proxyUrl = rewriteMcpProxyUrlForTab(tab, fullUrl);
-        var proxyPayload = {
-          callId: callId,
-          toolName: toolName,
-          url: proxyUrl,
-          method: method,
-          headers: execHeaders,
-          body: bodyData,
-          timeout: 30000
-        };
-        chrome.tabs.sendMessage(tab.id, { type: 'MCP_PROXY_REQUEST', payload: proxyPayload }, function (response) {
-          var result = response || { ok: false, error: 'No response from content script', proxyMode: 'tab' };
+        dispatchMcpProxyViaTabs([tab], built.payload, fullUrl, function (response, errMsg) {
+          var result = response || { ok: false, error: errMsg || 'No response from content script', proxyMode: 'tab' };
           result.callId = callId;
 
           addMcpCallLog({
@@ -865,7 +1060,7 @@ function handleMcpToolCall(callId, toolName, toolArguments) {
           }
         });
       } else {
-        fallbackFetch(toolMeta, fullUrl, method, execHeaders, bodyData).then(function (fbResult) {
+        fallbackFetch(toolMeta, fullUrl, built.method, built.execHeaders, built.bodyData).then(function (fbResult) {
           fbResult.callId = callId;
 
           addMcpCallLog({

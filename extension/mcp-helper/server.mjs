@@ -19,13 +19,22 @@ function isMcpRequestPath(reqUrl) {
 }
 
 const args = process.argv.slice(2);
-let port = 9527;
+let cliDefaultPort = 9527;
 for (let i = 0; i < args.length; i++) {
   if (args[i] === '--port' && args[i + 1]) {
-    port = parseInt(args[i + 1], 10);
+    cliDefaultPort = parseInt(args[i + 1], 10);
     i++;
   }
 }
+
+function normalizePort(p) {
+  const n = parseInt(p, 10);
+  if (!Number.isFinite(n) || n < 1 || n > 65535) return 9527;
+  return n;
+}
+
+let currentPort = 0;
+let httpListening = false;
 
 // ==================== 工具定义缓存 & 调用回调 ====================
 
@@ -128,9 +137,22 @@ function handleNMMessage(msg) {
       }
       break;
     }
+    case 'START_SERVER': {
+      startHttpServer(msg.port != null ? msg.port : cliDefaultPort);
+      break;
+    }
+    case 'STOP_SERVER': {
+      stopHttpServer();
+      break;
+    }
     case 'SHUTDOWN': {
       log('收到 SHUTDOWN 命令，退出');
-      process.exit(0);
+      if (httpListening) {
+        server.close(() => process.exit(0));
+      } else {
+        process.exit(0);
+      }
+      break;
     }
     case 'LIST_EXPORT_DIR': {
       const { requestId, dirPath } = msg;
@@ -342,8 +364,29 @@ function processMCPMessage(msg, sendResponse, clientInfo) {
 
 const httpClients = new Map();
 
+function requestPathname(reqUrl) {
+  if (!reqUrl || typeof reqUrl !== 'string') return '/';
+  try {
+    return new URL(reqUrl, 'http://127.0.0.1').pathname;
+  } catch {
+    return reqUrl.split('?')[0] || '/';
+  }
+}
+
 function handleHTTPRequest(req, res) {
   const url = req.url;
+  const pathname = requestPathname(url);
+
+  if (pathname === '/health') {
+    if (req.method !== 'GET') {
+      res.writeHead(405, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Method Not Allowed' }));
+      return;
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true, port: currentPort, tools: cachedTools.length }));
+    return;
+  }
 
   if (!isMcpRequestPath(url)) {
     res.writeHead(404, { 'Content-Type': 'application/json' });
@@ -609,12 +652,62 @@ server.on('upgrade', (req, socket, head) => {
   handleWSConnection(socket);
 });
 
-server.listen(port, 'localhost', () => {
-  log(`MCP Server 启动，监听 localhost:${port}/mcp`);
-  log(`支持传输: Streamable HTTP (POST/GET) + WebSocket`);
-  if (AUTH_TOKEN) log('鉴权 Token 已配置');
-  else log('未配置鉴权 Token，允许所有连接');
-});
+function startHttpServer(targetPort) {
+  const port = normalizePort(targetPort);
+  if (httpListening && currentPort === port) {
+    writeNMMessage({ type: 'SERVER_STARTED', port });
+    return;
+  }
+
+  const onListenError = (err) => {
+    server.removeListener('error', onListenError);
+    httpListening = false;
+    currentPort = 0;
+    const msg =
+      err && err.code === 'EADDRINUSE'
+        ? `端口 ${port} 已被占用`
+        : (err && err.message ? err.message : String(err));
+    writeNMMessage({ type: 'SERVER_START_FAILED', port, error: msg });
+  };
+
+  const onListenSuccess = () => {
+    server.removeListener('error', onListenError);
+    httpListening = true;
+    currentPort = port;
+    log(`MCP Server 启动，监听 localhost:${port}/mcp`);
+    log('支持传输: Streamable HTTP (POST/GET) + WebSocket');
+    if (AUTH_TOKEN) log('鉴权 Token 已配置');
+    else log('未配置鉴权 Token，允许所有连接');
+    writeNMMessage({ type: 'SERVER_STARTED', port });
+  };
+
+  const bindListen = () => {
+    server.once('error', onListenError);
+    server.listen(port, '127.0.0.1', onListenSuccess);
+  };
+
+  if (httpListening) {
+    server.close(() => {
+      httpListening = false;
+      currentPort = 0;
+      bindListen();
+    });
+  } else {
+    bindListen();
+  }
+}
+
+function stopHttpServer() {
+  if (!httpListening) {
+    writeNMMessage({ type: 'SERVER_STOPPED' });
+    return;
+  }
+  server.close(() => {
+    httpListening = false;
+    currentPort = 0;
+    writeNMMessage({ type: 'SERVER_STOPPED' });
+  });
+}
 
 // ==================== 启动 stdin 监听 ====================
 
@@ -623,6 +716,13 @@ listenStdin().catch((err) => {
   log(`stdin 监听错误: ${err.message}`);
   process.exit(1);
 });
+
+// 兼容旧扩展：2 秒内未收到 START_SERVER 则按 CLI/默认端口启动
+setTimeout(() => {
+  if (!httpListening) {
+    startHttpServer(cliDefaultPort);
+  }
+}, 2000);
 
 // ==================== 工具函数 ====================
 

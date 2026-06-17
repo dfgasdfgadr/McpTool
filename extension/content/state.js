@@ -125,7 +125,9 @@ var state = {
     filterEnabled: 'all',
     riskLevels: {},
     toolbarCollapsed: false,
-    siteFilter: 'all'
+    siteFilter: 'all',
+    selectedToolName: null,
+    inspectorOpen: false
   }
 };
 

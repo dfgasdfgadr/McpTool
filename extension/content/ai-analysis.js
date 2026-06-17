@@ -58,7 +58,7 @@ function analyzeRequest(reqId) {
 
   return callAI(messages).then(function (result) {
     req.aiAnalysis = result;
-    if (state.expandedReqId === reqId) {
+    if (state.expandedReqId === reqId || (state.ui && state.ui.requestTable && state.ui.requestTable.selectedId === reqId)) {
       renderRequestDetail(reqId);
     }
     refreshRequestList();

@@ -9,11 +9,115 @@ function ensureMcpListUi() {
       filterEnabled: 'all',
       riskLevels: {},
       toolbarCollapsed: false,
-      siteFilter: 'all'
+      siteFilter: 'all',
+      selectedToolName: null,
+      inspectorOpen: false
     };
-  } else if (!state.mcpListUi.siteFilter) {
-    state.mcpListUi.siteFilter = 'all';
+  } else {
+    if (!state.mcpListUi.siteFilter) state.mcpListUi.siteFilter = 'all';
+    if (typeof state.mcpListUi.selectedToolName === 'undefined') state.mcpListUi.selectedToolName = null;
+    if (typeof state.mcpListUi.inspectorOpen !== 'boolean') state.mcpListUi.inspectorOpen = false;
   }
+}
+
+function syncMcpInspectorVisibility(mcpContent) {
+  if (!mcpContent) return;
+  ensureMcpListUi();
+  var split = mcpContent.querySelector('.ai-req-mcp-workbench-split');
+  var inspector = mcpContent.querySelector('.ai-req-mcp-inspector');
+  if (!split || !inspector) return;
+  var ui = state.mcpListUi;
+  var open = !!ui.inspectorOpen && !!ui.selectedToolName;
+  var isWide = state.ui && state.ui.layoutMode === 'wide';
+  split.setAttribute('data-inspector-open', open ? '1' : '0');
+  inspector.style.display = open ? 'flex' : 'none';
+  inspector.classList.toggle('ai-req-mcp-inspector-overlay', open && !isWide);
+  split.classList.toggle('ai-req-mcp-split-has-inspector', open && isWide);
+}
+
+function updateMcpSelectionStrip(mcpContent) {
+  if (!mcpContent) return;
+  var strip = mcpContent.querySelector('.ai-req-mcp-selection-strip');
+  if (!strip) return;
+  var n = getSelectedMcpToolNamesOrdered().length;
+  strip.style.display = n > 0 ? 'flex' : 'none';
+  var spn = strip.querySelector('.ai-req-mcp-sel-count');
+  if (spn) spn.textContent = '已选 ' + n;
+}
+
+function buildMcpToolInspectorHTML(toolName) {
+  var toolsMap = getMcpListToolsMap();
+  var tool = toolsMap[toolName];
+  if (!tool) {
+    return '<div class="ai-req-inspector-empty">工具不存在或已被删除</div>';
+  }
+  var meta = tool._meta || {};
+  var host = resolveMcpToolHostFromView(toolName);
+  var riskLevel = (tool._meta && tool._meta.riskLevel) || 'low';
+  var enabled = tool.enabled !== false;
+  var routeLine = ((meta.method || 'GET').toUpperCase() + ' ' + (meta.pathname || '')).trim();
+  var html = '';
+  html += '<div class="ai-req-mcp-inspector-meta">';
+  html += '<span class="ai-req-mcp-risk ai-req-mcp-risk-' + escapeHtml(riskLevel) + '">' + escapeHtml(riskLevel) + '</span>';
+  html += '<span class="ai-req-mcp-inspector-route">' + escapeHtml(routeLine) + '</span>';
+  html += '<span class="ai-req-mcp-inspector-host">' + escapeHtml(host) + '</span>';
+  html += '</div>';
+  html += '<div class="ai-req-mcp-inspector-section">';
+  html += '<div class="ai-req-detail-label">描述</div>';
+  html += '<div class="ai-req-detail-value">' + escapeHtml(tool.description || '（无）') + '</div>';
+  html += '</div>';
+  html += '<div class="ai-req-mcp-inspector-section">';
+  html += '<div class="ai-req-detail-label">启用状态</div>';
+  html += '<label class="ai-req-mcp-inspector-enabled-label"><input type="checkbox" class="ai-req-mcp-tool-enabled ai-req-mcp-inspector-enabled" data-tool-name="' + escapeHtml(toolName) + '"' + (enabled ? ' checked' : '') + '> 启用此工具</label>';
+  html += '</div>';
+  var props = (tool.inputSchema && tool.inputSchema.properties) || {};
+  var required = (tool.inputSchema && tool.inputSchema.required) || [];
+  var propKeys = Object.keys(props);
+  html += '<div class="ai-req-mcp-inspector-section">';
+  html += '<div class="ai-req-detail-label">参数 Schema（' + propKeys.length + '）</div>';
+  if (propKeys.length === 0) {
+    html += '<div class="ai-req-detail-value">无参数</div>';
+  } else {
+    html += '<div class="ai-req-mcp-schema-list">';
+    for (var pi = 0; pi < propKeys.length; pi++) {
+      var pName = propKeys[pi];
+      var pDef = props[pName];
+      var isReq = required.indexOf(pName) !== -1;
+      html += '<div class="ai-req-mcp-schema-item">';
+      html += '<span class="ai-req-mcp-schema-name">' + escapeHtml(pName) + '</span>';
+      html += '<span class="ai-req-mcp-schema-type">' + escapeHtml(pDef.type || 'string') + '</span>';
+      if (isReq) html += '<span class="ai-req-mcp-schema-req">required</span>';
+      if (pDef.description) {
+        html += '<div class="ai-req-mcp-schema-desc">' + escapeHtml(pDef.description) + '</div>';
+      }
+      html += '</div>';
+    }
+    html += '</div>';
+  }
+  html += '</div>';
+  html += '<div class="ai-req-mcp-inspector-actions">';
+  html += '<button type="button" class="ai-req-btn ai-req-btn-primary ai-req-mcp-tool-edit-btn" data-tool-name="' + escapeHtml(toolName) + '">编辑</button>';
+  html += '<button type="button" class="ai-req-btn ai-req-btn-secondary ai-req-mcp-tool-test-btn" data-tool-name="' + escapeHtml(toolName) + '">测试</button>';
+  html += '<button type="button" class="ai-req-btn ai-req-btn-danger ai-req-mcp-tool-delete-btn" data-tool-name="' + escapeHtml(toolName) + '">删除</button>';
+  html += '</div>';
+  return html;
+}
+
+function renderMcpToolInspector(mcpContent, toolName) {
+  if (!mcpContent) return;
+  var body = mcpContent.querySelector('.ai-req-mcp-inspector-body');
+  var titleEl = mcpContent.querySelector('.ai-req-mcp-inspector-title');
+  if (!body) return;
+  if (!toolName) {
+    if (titleEl) titleEl.textContent = '工具详情';
+    body.innerHTML = '<div class="ai-req-inspector-empty">选择一条工具查看详情</div>';
+    return;
+  }
+  if (titleEl) {
+    titleEl.textContent = toolName;
+    titleEl.title = toolName;
+  }
+  body.innerHTML = buildMcpToolInspectorHTML(toolName);
 }
 
 function getMcpListToolsMap() {
@@ -95,22 +199,23 @@ function buildMcpToolListInnerHTML() {
   var ui = state.mcpListUi;
   var html = '';
   if (!state.mcpViewDataset) {
-    return '<div class="ai-req-mcp-empty">\u6B63\u5728\u52A0\u8F7D\u5DE5\u5177\u5217\u8868...</div>';
+    return '<div class="ai-req-mcp-empty">正在加载工具列表...</div>';
   }
   if (!state.mcpViewDataset.ok) {
-    return '<div class="ai-req-mcp-empty">\u65E0\u6CD5\u52A0\u8F7D\u5DE5\u5177\u6570\u636E\uFF0C\u8BF7\u5173\u95ED\u518D\u6253\u5F00 MCP \u9762\u677F\u91CD\u8BD5</div>';
+    return '<div class="ai-req-mcp-empty">无法加载工具数据，请关闭再打开 MCP 面板重试</div>';
   }
   var toolsMap = getMcpListToolsMap();
   var hostByTool = (state.mcpViewDataset && state.mcpViewDataset.hostByTool) || {};
   var sfUi = ui.siteFilter || 'all';
-  var showHostChip = sfUi === 'all' || sfUi === MCP_SITE_FILTER_EXCLUDE_CURRENT;
+  var showHostCol = sfUi === 'all' || sfUi === MCP_SITE_FILTER_EXCLUDE_CURRENT;
   var toolNames = getFilteredSortedMcpToolNames();
   var gm2 = ui.groupMode || 'none';
   var lastGk = '\u0000';
+  var selectedName = ui.selectedToolName;
   if (Object.keys(toolsMap || {}).length === 0) {
-    html += '<div class="ai-req-mcp-empty">\u6682\u65E0 MCP \u5DE5\u5177\uFF08\u5F53\u524D\u7B5B\u9009\u8303\u56F4\uFF09\uFF0C\u53EF\u5207\u6362\u300C\u5168\u90E8\u7AD9\u70B9\u300D\u6216\u6362\u7AD9\u70B9\u67E5\u770B</div>';
+    html += '<div class="ai-req-mcp-empty">暂无 MCP 工具（当前筛选范围），可切换「全部站点」或换站点查看</div>';
   } else if (toolNames.length === 0) {
-    html += '<div class="ai-req-mcp-empty">\u65E0\u5339\u914D\u9879\uFF0C\u8C03\u6574\u7B5B\u9009\u6216\u5173\u952E\u8BCD</div>';
+    html += '<div class="ai-req-mcp-empty">无匹配项，调整筛选或关键词</div>';
   }
   var ti;
   for (ti = 0; ti < toolNames.length; ti++) {
@@ -118,10 +223,9 @@ function buildMcpToolListInnerHTML() {
     var tool = toolsMap[name];
     var riskLevel = (tool._meta && tool._meta.riskLevel) || 'low';
     var enabled = tool.enabled !== false;
-    var desc = tool.description || '';
     var picked = state.selectedMcpToolNames[name] ? true : false;
     var meta = tool._meta || {};
-    var routeLine = ((meta.method || 'GET').toUpperCase() + ' ' + (meta.pathname || '')).trim();
+    var isSelected = selectedName === name;
     if (gm2 !== 'none') {
       var gk = getMcpToolGroupKey(name, tool, gm2);
       if (gk !== lastGk) {
@@ -129,31 +233,48 @@ function buildMcpToolListInnerHTML() {
         html += '<div class="ai-req-mcp-group-header"><span class="ai-req-mcp-group-title">' + escapeHtml(gk) + '</span></div>';
       }
     }
-    html += '<div class="ai-req-mcp-tool-item" data-tool-name="' + escapeHtml(name) + '">';
-    html += '<div class="ai-req-mcp-tool-main">';
-    html += '<label class="ai-req-mcp-tool-pick-wrap"><input type="checkbox" class="ai-req-mcp-tool-pick" data-tool-name="' + escapeHtml(name) + '"' + (picked ? ' checked' : '') + '></label>';
-    html += '<div class="ai-req-mcp-tool-right">';
-    html += '<div class="ai-req-mcp-tool-header">';
-    html += '<span class="ai-req-mcp-tool-name" title="' + escapeHtml(name) + '">' + escapeHtml(name) + '</span>';
-    if (showHostChip && hostByTool[name]) {
-      html +=
-        '<span class="ai-req-mcp-tool-host" title="\u6765\u6E90\u7AD9\u70B9">' +
-        escapeHtml(hostByTool[name]) +
-        '</span>';
+    html += '<div class="ai-req-mcp-table-row' + (isSelected ? ' ai-req-mcp-row-selected' : '') + (showHostCol ? '' : ' ai-req-mcp-row-no-host') + '" data-tool-name="' + escapeHtml(name) + '">';
+    html += '<label class="ai-req-mcp-row-cb"><input type="checkbox" class="ai-req-mcp-tool-pick" data-tool-name="' + escapeHtml(name) + '"' + (picked ? ' checked' : '') + '></label>';
+    html += '<span class="ai-req-mcp-col-name" title="' + escapeHtml(name) + '">' + escapeHtml(name) + '</span>';
+    if (showHostCol) {
+      html += '<span class="ai-req-mcp-col-host" title="来源站点">' + escapeHtml(hostByTool[name] || '-') + '</span>';
     }
-    html += '<span class="ai-req-mcp-risk ai-req-mcp-risk-' + escapeHtml(riskLevel) + '">' + escapeHtml(riskLevel) + '</span>';
-    html += '<label class="ai-req-mcp-toggle"><input type="checkbox" class="ai-req-mcp-tool-enabled" data-tool-name="' + escapeHtml(name) + '"' + (enabled ? ' checked' : '') + '></label>';
+    html += '<span class="ai-req-mcp-col-method">' + escapeHtml((meta.method || 'GET').toUpperCase()) + '</span>';
+    html += '<span class="ai-req-mcp-col-path" title="' + escapeHtml(meta.pathname || '') + '">' + escapeHtml(meta.pathname || '-') + '</span>';
+    html += '<span class="ai-req-mcp-risk ai-req-mcp-risk-' + escapeHtml(riskLevel) + ' ai-req-mcp-col-risk">' + escapeHtml(riskLevel) + '</span>';
+    html += '<label class="ai-req-mcp-toggle ai-req-mcp-col-enabled"><input type="checkbox" class="ai-req-mcp-tool-enabled" data-tool-name="' + escapeHtml(name) + '"' + (enabled ? ' checked' : '') + '></label>';
     html += '</div>';
-    html += '<div class="ai-req-mcp-tool-route">' + escapeHtml(routeLine) + '</div>';
-    html += '<div class="ai-req-mcp-tool-desc">' + escapeHtml(desc) + '</div>';
-    html += '<div class="ai-req-mcp-tool-actions">';
-    html += '<button type="button" class="ai-req-mcp-tool-edit-btn" data-tool-name="' + escapeHtml(name) + '">\u7F16\u8F91</button>';
-    html += '<button type="button" class="ai-req-mcp-tool-test-btn" data-tool-name="' + escapeHtml(name) + '">\u6D4B\u8BD5</button>';
-    html += '<button type="button" class="ai-req-mcp-tool-delete-btn" data-tool-name="' + escapeHtml(name) + '">\u5220\u9664</button>';
-    html += '</div>';
-    html += '</div></div></div>';
   }
   return html;
+}
+
+function refreshMcpToolListViewLocal(mcpContent) {
+  if (!mcpContent) return;
+  ensureMcpListUi();
+  var listEl = mcpContent.querySelector('.ai-req-mcp-tool-list');
+  if (!listEl) return;
+  listEl.innerHTML = buildMcpToolListInnerHTML();
+  var toolNamesAfter = getFilteredSortedMcpToolNames();
+  if (state.mcpListUi.selectedToolName && toolNamesAfter.indexOf(state.mcpListUi.selectedToolName) === -1) {
+    state.mcpListUi.selectedToolName = null;
+    state.mcpListUi.inspectorOpen = false;
+  }
+  if (state.ui && state.ui.layoutMode === 'wide' && state.mcpListUi.selectedToolName) {
+    state.mcpListUi.inspectorOpen = true;
+  }
+  renderMcpToolInspector(
+    mcpContent,
+    state.mcpListUi.inspectorOpen ? state.mcpListUi.selectedToolName : null
+  );
+  syncMcpInspectorVisibility(mcpContent);
+  updateMcpSelectionStrip(mcpContent);
+  var tableHead = mcpContent.querySelector('.ai-req-mcp-table-head');
+  if (tableHead) {
+    var sfHead = state.mcpListUi.siteFilter || 'all';
+    var showHostHead = sfHead === 'all' || sfHead === MCP_SITE_FILTER_EXCLUDE_CURRENT;
+    tableHead.classList.toggle('ai-req-mcp-table-head-no-host', !showHostHead);
+    tableHead.style.display = toolNamesAfter.length > 0 ? 'grid' : 'none';
+  }
 }
 
 function patchMcpToolListSection(mcpContent) {
@@ -240,7 +361,7 @@ function patchMcpToolListSection(mcpContent) {
       exBtnSync.textContent = onEx ? '\u663E\u793A\u5168\u90E8\u7AD9\u70B9' : '\u6392\u9664\u5F53\u524D\u9875';
     }
 
-    listEl.innerHTML = buildMcpToolListInnerHTML();
+    refreshMcpToolListViewLocal(mcpContent);
 
     var miniBar = mcpContent.querySelector('.ai-req-mcp-toolbar-mini');
     if (miniBar) {
@@ -262,11 +383,10 @@ function patchMcpToolListSection(mcpContent) {
 }
 
 function bindMcpToolListRowEvents(mcpContent) {
-  var listEl = mcpContent.querySelector('.ai-req-mcp-tool-list');
-  if (!listEl || listEl._aiReqMcpRowsDelegated) return;
-  listEl._aiReqMcpRowsDelegated = true;
+  if (!mcpContent || mcpContent._aiReqMcpRowsDelegated) return;
+  mcpContent._aiReqMcpRowsDelegated = true;
 
-  listEl.addEventListener('change', function (ev) {
+  mcpContent.addEventListener('change', function (ev) {
     var target = ev.target;
     if (!target || !target.classList) return;
     if (target.classList.contains('ai-req-mcp-tool-enabled')) {
@@ -284,10 +404,29 @@ function bindMcpToolListRowEvents(mcpContent) {
       if (!state.selectedMcpToolNames) state.selectedMcpToolNames = {};
       if (target.checked) state.selectedMcpToolNames[pnm] = true;
       else delete state.selectedMcpToolNames[pnm];
+      updateMcpSelectionStrip(mcpContent);
     }
   });
 
-  listEl.addEventListener('click', function (ev) {
+  mcpContent.addEventListener('click', function (ev) {
+    var row = ev.target && ev.target.closest ? ev.target.closest('.ai-req-mcp-table-row') : null;
+    if (row && !ev.target.closest('input') && !ev.target.closest('button') && !ev.target.closest('label')) {
+      var rowName = row.getAttribute('data-tool-name');
+      if (rowName) {
+        ensureMcpListUi();
+        if (state.mcpListUi.selectedToolName === rowName) {
+          if (state.ui && state.ui.layoutMode !== 'wide') {
+            state.mcpListUi.inspectorOpen = !state.mcpListUi.inspectorOpen;
+          }
+        } else {
+          state.mcpListUi.selectedToolName = rowName;
+          state.mcpListUi.inspectorOpen = true;
+        }
+        refreshMcpToolListViewLocal(mcpContent);
+      }
+      return;
+    }
+
     var btn = ev.target && ev.target.closest ? ev.target.closest('button[data-tool-name]') : null;
     if (!btn) return;
     var toolName = btn.getAttribute('data-tool-name');
@@ -300,12 +439,22 @@ function bindMcpToolListRowEvents(mcpContent) {
       return;
     }
     if (btn.classList.contains('ai-req-mcp-tool-delete-btn')) {
-      if (confirm('\u786E\u5B9A\u5220\u9664\u5DE5\u5177 "' + toolName + '"\uFF1F')) {
+      confirmDangerAction({
+        title: '删除 MCP 工具',
+        message: '将永久删除工具「' + toolName + '」。Cursor 同步后该工具不再可用，且不可撤销。',
+        confirmLabel: '删除工具'
+      }).then(function (ok) {
+        if (!ok) return;
         deleteMcpToolFromHost(resolveMcpToolHostFromView(toolName), toolName);
         chrome.runtime.sendMessage({ type: 'MCP_SYNC_TOOLS' });
+        if (state.mcpListUi && state.mcpListUi.selectedToolName === toolName) {
+          state.mcpListUi.selectedToolName = null;
+          state.mcpListUi.inspectorOpen = false;
+        }
+        delete state.selectedMcpToolNames[toolName];
         patchMcpToolListSection(mcpContent);
-        showToast('\u5DF2\u5220\u9664: ' + toolName);
-      }
+        showToast('已删除: ' + toolName, 2500, 'success');
+      });
     }
   });
 }
@@ -391,8 +540,29 @@ function buildMcpToolListHTML() {
   html += '</div>';
   html += '</div>';
   html += '</div>';
+  html += '<div class="ai-req-mcp-workbench-split">';
+  html += '<div class="ai-req-mcp-table-pane">';
+  html += '<div class="ai-req-mcp-selection-strip" style="display:none"><span class="ai-req-mcp-sel-count">已选 0</span></div>';
+  html += '<div class="ai-req-mcp-table-head">';
+  html += '<span class="ai-req-mcp-th ai-req-mcp-th-cb"></span>';
+  html += '<span class="ai-req-mcp-th ai-req-mcp-th-name">工具名</span>';
+  html += '<span class="ai-req-mcp-th ai-req-mcp-th-host">来源</span>';
+  html += '<span class="ai-req-mcp-th ai-req-mcp-th-method">方法</span>';
+  html += '<span class="ai-req-mcp-th ai-req-mcp-th-path">路径</span>';
+  html += '<span class="ai-req-mcp-th ai-req-mcp-th-risk">风险</span>';
+  html += '<span class="ai-req-mcp-th ai-req-mcp-th-enabled">启用</span>';
+  html += '</div>';
   html += '<div class="ai-req-mcp-tool-list">';
   html += buildMcpToolListInnerHTML();
+  html += '</div>';
+  html += '</div>';
+  html += '<div class="ai-req-mcp-inspector" style="display:none">';
+  html += '<div class="ai-req-mcp-inspector-header">';
+  html += '<span class="ai-req-mcp-inspector-title">工具详情</span>';
+  html += '<button type="button" class="ai-req-panel-btn ai-req-mcp-inspector-close-btn" title="关闭详情">\u2715</button>';
+  html += '</div>';
+  html += '<div class="ai-req-mcp-inspector-body"></div>';
+  html += '</div>';
   html += '</div>';
   html += '<div class="ai-req-mcp-tab-bar">';
   html += '<button class="ai-req-mcp-tab' + (state.mcpPanelTab === 'list' ? ' active' : '') + '" data-mcp-tab="list">\u5DE5\u5177\u5217\u8868</button>';
@@ -431,18 +601,79 @@ function buildMcpLogListHTML() {
   var html = '';
   html += '<div class="ai-req-mcp-status-bar">';
   html += '<span class="ai-req-mcp-status-dot ai-req-mcp-status-dot-off"></span>';
-  html += '<span class="ai-req-mcp-status-text">MCP \u25CB \u672A\u542F\u52A8</span>';
-  html += '<button class="ai-req-mcp-start-btn">\u542F\u52A8</button>';
+  html += '<span class="ai-req-mcp-status-text">MCP ○ 未启动</span>';
+  html += '<button class="ai-req-mcp-start-btn">启动</button>';
+  html += '</div>';
+  html += '<div class="ai-req-mcp-workbench-split ai-req-mcp-log-split">';
+  html += '<div class="ai-req-mcp-table-pane">';
+  html += '<div class="ai-req-mcp-log-table-head">';
+  html += '<span class="ai-req-mcp-th">时间</span>';
+  html += '<span class="ai-req-mcp-th">工具</span>';
+  html += '<span class="ai-req-mcp-th">状态</span>';
+  html += '<span class="ai-req-mcp-th">耗时</span>';
+  html += '<span class="ai-req-mcp-th">错误</span>';
   html += '</div>';
   html += '<div class="ai-req-mcp-log-list">';
-  html += '<div class="ai-req-mcp-log-loading">\u52A0\u8F7D\u4E2D...</div>';
+  html += '<div class="ai-req-mcp-log-loading">加载中...</div>';
+  html += '</div>';
+  html += '</div>';
+  html += '<div class="ai-req-mcp-log-inspector" style="display:none">';
+  html += '<div class="ai-req-mcp-inspector-header">';
+  html += '<span class="ai-req-mcp-log-inspector-title">日志详情</span>';
+  html += '<button type="button" class="ai-req-panel-btn ai-req-mcp-log-inspector-close-btn" title="关闭">\u2715</button>';
+  html += '</div>';
+  html += '<div class="ai-req-mcp-log-inspector-body"></div>';
+  html += '</div>';
   html += '</div>';
   html += '<div class="ai-req-mcp-tab-bar">';
-  html += '<button class="ai-req-mcp-tab' + (state.mcpPanelTab === 'list' ? ' active' : '') + '" data-mcp-tab="list">\u5DE5\u5177\u5217\u8868</button>';
-  html += '<button class="ai-req-mcp-tab' + (state.mcpPanelTab === 'logs' ? ' active' : '') + '" data-mcp-tab="logs">\u8C03\u7528\u65E5\u5FD7</button>';
-  html += '<button class="ai-req-mcp-tab' + (state.mcpPanelTab === 'localExports' ? ' active' : '') + '" data-mcp-tab="localExports">\u8BFB\u53D6\u672C\u5730\u5DE5\u5177\u5217\u8868</button>';
+  html += '<button class="ai-req-mcp-tab' + (state.mcpPanelTab === 'list' ? ' active' : '') + '" data-mcp-tab="list">工具列表</button>';
+  html += '<button class="ai-req-mcp-tab' + (state.mcpPanelTab === 'logs' ? ' active' : '') + '" data-mcp-tab="logs">调用日志</button>';
+  html += '<button class="ai-req-mcp-tab' + (state.mcpPanelTab === 'localExports' ? ' active' : '') + '" data-mcp-tab="localExports">读取本地工具列表</button>';
   html += '</div>';
   return html;
+}
+
+function renderMcpLogInspector(mcpContent, logEntry) {
+  if (!mcpContent) return;
+  var body = mcpContent.querySelector('.ai-req-mcp-log-inspector-body');
+  var titleEl = mcpContent.querySelector('.ai-req-mcp-log-inspector-title');
+  var inspector = mcpContent.querySelector('.ai-req-mcp-log-inspector');
+  if (!body || !inspector) return;
+  if (!logEntry) {
+    if (titleEl) titleEl.textContent = '日志详情';
+    body.innerHTML = '<div class="ai-req-inspector-empty">选择一条日志查看详情</div>';
+    inspector.style.display = 'none';
+    return;
+  }
+  if (titleEl) titleEl.textContent = (logEntry.toolName || '未知工具') + ' · ' + String(logEntry.status || 0);
+  var argsText = '';
+  try {
+    argsText = JSON.stringify(JSON.parse(logEntry.argsSummary || '{}'), null, 2);
+  } catch (e) {
+    argsText = logEntry.argsSummary || '';
+  }
+  var html = '';
+  html += '<div class="ai-req-mcp-inspector-section"><div class="ai-req-detail-label">请求参数</div>';
+  html += '<pre class="ai-req-mcp-log-detail-code">' + escapeHtml(argsText) + '</pre></div>';
+  html += '<div class="ai-req-mcp-inspector-section"><div class="ai-req-detail-label">代理模式</div>';
+  html += '<div class="ai-req-detail-value">' + escapeHtml(logEntry.proxyMode || '-') + '</div></div>';
+  if (logEntry.error) {
+    html += '<div class="ai-req-mcp-inspector-section"><div class="ai-req-detail-label">错误详情</div>';
+    html += '<div class="ai-req-detail-value ai-req-log-error-text">' + escapeHtml(logEntry.error) + '</div></div>';
+  }
+  body.innerHTML = html;
+  inspector.style.display = 'flex';
+}
+
+function syncMcpLogInspectorLayout(mcpContent) {
+  if (!mcpContent) return;
+  var split = mcpContent.querySelector('.ai-req-mcp-log-split');
+  var inspector = mcpContent.querySelector('.ai-req-mcp-log-inspector');
+  if (!split || !inspector) return;
+  var open = inspector.style.display !== 'none';
+  var isWide = state.ui && state.ui.layoutMode === 'wide';
+  inspector.classList.toggle('ai-req-mcp-inspector-overlay', open && !isWide);
+  split.classList.toggle('ai-req-mcp-split-has-inspector', open && isWide);
 }
 
 function refreshLocalExportsFileList(mcpContent) {
@@ -472,6 +703,11 @@ function refreshLocalExportsFileList(mcpContent) {
       return;
     }
     var html = '';
+    html += '<div class="ai-req-mcp-local-table-head">';
+    html += '<span class="ai-req-mcp-th">文件名</span>';
+    html += '<span class="ai-req-mcp-th">修改时间</span>';
+    html += '<span class="ai-req-mcp-th ai-req-mcp-th-actions">导入策略</span>';
+    html += '</div>';
     var fi;
     for (fi = 0; fi < files.length; fi++) {
       var f = files[fi];
@@ -490,19 +726,20 @@ function refreshLocalExportsFileList(mcpContent) {
       html += '<div class="ai-req-mcp-local-file-row">';
       html += '<span class="ai-req-mcp-local-file-name">' + escapeHtml(f.name) + '</span>';
       html += '<span class="ai-req-mcp-local-file-mtime">' + escapeHtml(timeStr) + '</span>';
+      html += '<span class="ai-req-mcp-local-file-actions">';
       html +=
         '<button type="button" class="ai-req-btn ai-req-btn-secondary ai-req-mcp-local-imp-skip" data-local-import="merge-skip" data-file-name="' +
         encName +
-        '">\u5BFC\u5165\uFF08\u5408\u5E76\uFF09</button>';
+        '">合并</button>';
       html +=
         '<button type="button" class="ai-req-btn ai-req-btn-secondary ai-req-mcp-local-imp-ow" data-local-import="merge-overwrite" data-file-name="' +
         encName +
-        '">\u5BFC\u5165\u5E76\u8986\u76D6</button>';
+        '">覆盖</button>';
       html +=
         '<button type="button" class="ai-req-btn ai-req-btn-danger ai-req-mcp-local-imp-repl" data-local-import="replace" data-file-name="' +
         encName +
-        '">\u6E05\u9664\u5E76\u5BFC\u5165</button>';
-      html += '</div>';
+        '">清空导入</button>';
+      html += '</span></div>';
     }
     listEl.innerHTML = html;
   });
@@ -515,16 +752,21 @@ function runLocalMcpExportImport(_mcpContent, fileName, mode) {
     return;
   }
   if (mode === 'replace') {
-    if (
-      !confirm(
-        '\u5C06\u6E05\u7A7A\u5F53\u524D\u7AD9\u70B9\u4E0B\u5168\u90E8 MCP \u5DE5\u5177\uFF0C\u518D\u4EE5\u6587\u4EF6\u300C' +
-          fileName +
-          '\u300D\u5168\u91CF\u66FF\u6362\u3002\u6B64\u64CD\u4F5C\u4E0D\u53EF\u64A4\u9500\uFF08\u53EF\u518D\u5BFC\u5165\u5907\u4EFD\uFF09\u3002\u786E\u5B9A\uFF1F'
-      )
-    ) {
-      return;
-    }
+    confirmDangerAction({
+      title: '清空并导入 MCP 工具',
+      message: '将清空当前站点下全部 MCP 工具，再以文件「' + fileName + '」全量替换。现有工具配置不可恢复（可先导出备份）。',
+      confirmLabel: '清空并导入'
+    }).then(function (ok) {
+      if (!ok) return;
+      doLocalMcpImport(_mcpContent, fileName, mode, dirPath);
+    });
+    return;
   }
+  doLocalMcpImport(_mcpContent, fileName, mode, dirPath);
+}
+
+function doLocalMcpImport(_mcpContent, fileName, mode, dirPath) {
+  dirPath = dirPath || (state.config && state.config.mcpExportPath ? String(state.config.mcpExportPath).trim() : '');
   chrome.runtime.sendMessage(
     { type: 'MCP_READ_EXPORT_FILE', dirPath: dirPath, fileName: fileName },
     function (res) {
@@ -593,6 +835,9 @@ function bindLocalExportsPanelEvents(mcpContent) {
 }
 
 function bindMcpContentEvents(mcpContent) {
+  if (!mcpContent || mcpContent._aiReqMcpContentBound) return;
+  mcpContent._aiReqMcpContentBound = true;
+
   refreshMcpStatusBar(mcpContent);
 
   ensureMcpListUi();
@@ -633,7 +878,7 @@ function bindMcpContentEvents(mcpContent) {
     mcpSearch.addEventListener('input', function () {
       ensureMcpListUi();
       state.mcpListUi.keyword = mcpSearch.value;
-      patchMcpToolListSection(mcpContent);
+      refreshMcpToolListViewLocal(mcpContent);
     });
   }
 
@@ -642,7 +887,7 @@ function bindMcpContentEvents(mcpContent) {
     grpSel.addEventListener('change', function () {
       ensureMcpListUi();
       state.mcpListUi.groupMode = grpSel.value || 'none';
-      patchMcpToolListSection(mcpContent);
+      refreshMcpToolListViewLocal(mcpContent);
     });
   }
 
@@ -653,7 +898,7 @@ function bindMcpContentEvents(mcpContent) {
       ensureMcpListUi();
       var v = this.getAttribute('data-mcp-fe');
       state.mcpListUi.filterEnabled = v || 'all';
-      patchMcpToolListSection(mcpContent);
+      refreshMcpToolListViewLocal(mcpContent);
     });
   }
 
@@ -664,7 +909,7 @@ function bindMcpContentEvents(mcpContent) {
       var rk = this.getAttribute('data-mcp-risk');
       if (!state.mcpListUi.riskLevels) state.mcpListUi.riskLevels = {};
       state.mcpListUi.riskLevels[rk] = !state.mcpListUi.riskLevels[rk];
-      patchMcpToolListSection(mcpContent);
+      refreshMcpToolListViewLocal(mcpContent);
     });
   }
 
@@ -673,11 +918,15 @@ function bindMcpContentEvents(mcpContent) {
     startBtn.addEventListener('click', function () {
       var btn = startBtn;
       if (btn.textContent === '\u542F\u52A8') {
+        btn.disabled = true;
+        applyMcpStatusBarState(mcpContent, { serverStarting: true });
         chrome.runtime.sendMessage({ type: 'MCP_START_HELPER', payload: { mcpPort: state.config.mcpPort || 9527 } }, function (resp) {
+          btn.disabled = false;
           if (resp && resp.ok) {
-            setTimeout(function () { refreshMcpStatusBar(mcpContent); }, 500);
+            setTimeout(function () { refreshMcpStatusBar(mcpContent); }, 300);
           } else {
-            showToast('MCP \u542F\u52A8\u5931\u8D25: ' + ((resp && resp.error) || '\u672A\u77E5\u9519\u8BEF'));
+            var errMsg = (resp && (resp.error || resp.httpError || resp.helperError)) || '\u672A\u77E5\u9519\u8BEF';
+            showToast('MCP \u542F\u52A8\u5931\u8D25: ' + errMsg, 3500, 'error');
             setTimeout(function () { refreshMcpStatusBar(mcpContent); }, 200);
           }
         });
@@ -701,6 +950,17 @@ function bindMcpContentEvents(mcpContent) {
 
   if (state.mcpPanelTab === 'list') {
     patchMcpToolListSection(mcpContent);
+    var mcpCloseInsp = mcpContent.querySelector('.ai-req-mcp-inspector-close-btn');
+    if (mcpCloseInsp && !mcpCloseInsp._bound) {
+      mcpCloseInsp._bound = true;
+      mcpCloseInsp.addEventListener('click', function (e) {
+        e.stopPropagation();
+        ensureMcpListUi();
+        state.mcpListUi.inspectorOpen = false;
+        syncMcpInspectorVisibility(mcpContent);
+        refreshMcpToolListViewLocal(mcpContent);
+      });
+    }
   }
 
   var expAllBtn = mcpContent.querySelector('.ai-req-mcp-exp-all');
@@ -763,26 +1023,31 @@ function bindMcpContentEvents(mcpContent) {
       reader.onload = function (evRf) {
         try {
           var parsedImp = JSON.parse(String(evRf.target.result || '{}'));
-          var mergeFirst = confirm('\u786E\u5B9A=\u5408\u5E76\u5BFC\u5165 | \u53D6\u6D88=\u5168\u91CF\u66FF\u6362');
-          var outcome;
+          var mergeFirst = confirm('确定 = 合并导入 | 取消 = 全量替换');
           if (mergeFirst) {
-            var cmode = (prompt('\u540C\u540D: skip | overwrite | rename', 'skip') || 'skip').toLowerCase();
+            var cmode = (prompt('同名: skip | overwrite | rename', 'skip') || 'skip').toLowerCase();
             if (['skip', 'overwrite', 'rename'].indexOf(cmode) === -1) cmode = 'skip';
-            outcome = applyMcpToolsImport(parsedImp, 'merge', cmode);
+            var outcomeMerge = applyMcpToolsImport(parsedImp, 'merge', cmode);
+            finishFileImport(outcomeMerge);
           } else {
-            if (!confirm('\u786E\u5B9A\u7528\u6587\u4EF6\u5B8C\u5168\u66FF\u6362\u672C\u7AD9\u70B9 MCP \u5DE5\u5177\u914D\u7F6E\uFF1F')) {
-              outcome = { ok: false, error: 'cancelled' };
-            } else {
-              outcome = applyMcpToolsImport(parsedImp, 'replace');
-            }
+            confirmDangerAction({
+              title: '全量替换 MCP 工具',
+              message: '将用导入文件完全替换当前站点的 MCP 工具配置。现有工具不可恢复，建议先导出备份。',
+              confirmLabel: '全量替换'
+            }).then(function (ok) {
+              if (!ok) return;
+              finishFileImport(applyMcpToolsImport(parsedImp, 'replace'));
+            });
           }
-          if (outcome && outcome.ok) {
-            saveMcpTools();
-            chrome.runtime.sendMessage({ type: 'MCP_SYNC_TOOLS' });
-            refreshMainPanelContent();
-            showToast('\u5BFC\u5165\u6210\u529F ' + (outcome.imported || '') + '');
-          } else if (outcome && outcome.error !== 'cancelled') {
-            showToast('\u5BFC\u5165\u5931\u8D25: ' + outcome.error);
+          function finishFileImport(outcome) {
+            if (outcome && outcome.ok) {
+              saveMcpTools();
+              chrome.runtime.sendMessage({ type: 'MCP_SYNC_TOOLS' });
+              refreshMainPanelContent();
+              showToast('导入成功 ' + (outcome.imported || ''), 2500, 'success');
+            } else if (outcome && outcome.error !== 'cancelled') {
+              showToast('导入失败: ' + outcome.error, 3000, 'error');
+            }
           }
         } catch (eImp) {
           showToast('\u89E3\u6790\u5931\u8D25: ' + eImp.message);
@@ -800,7 +1065,7 @@ function bindMcpContentEvents(mcpContent) {
       var vis = getFilteredSortedMcpToolNames();
       var vx;
       for (vx = 0; vx < vis.length; vx++) state.selectedMcpToolNames[vis[vx]] = true;
-      patchMcpToolListSection(mcpContent);
+      refreshMcpToolListViewLocal(mcpContent);
     });
   }
 
@@ -808,7 +1073,7 @@ function bindMcpContentEvents(mcpContent) {
   if (selClrMc) {
     selClrMc.addEventListener('click', function () {
       state.selectedMcpToolNames = {};
-      patchMcpToolListSection(mcpContent);
+      refreshMcpToolListViewLocal(mcpContent);
     });
   }
 
@@ -878,89 +1143,85 @@ function bindMcpContentEvents(mcpContent) {
     delSelBtn.addEventListener('click', function () {
       var dnm = getSelectedMcpToolNamesOrdered();
       if (!dnm.length) {
-        showToast('\u5148\u52FE\u9009\u8981\u5220\u9664\u7684\u9879\u76EE');
+        showToast('请先勾选要删除的项目', 2500, 'info');
         return;
       }
-      if (!confirm('\u786E\u5B9A\u5220\u9664\u5DF2\u9009 ' + dnm.length + ' \u9879\uFF1F')) return;
-      var hbDel = (state.mcpViewDataset && state.mcpViewDataset.hostByTool) || {};
-      var dj;
-      for (dj = 0; dj < dnm.length; dj++) {
-        var tn = dnm[dj];
-        var hh = hbDel[tn] || location.hostname;
-        deleteMcpToolFromHost(hh, tn);
-      }
-      state.selectedMcpToolNames = {};
-      chrome.runtime.sendMessage({ type: 'MCP_SYNC_TOOLS' });
-      patchMcpToolListSection(mcpContent);
-      showToast('\u5DF2\u6279\u91CF\u5220\u9664');
+      confirmDangerAction({
+        title: '批量删除 MCP 工具',
+        message: '将永久删除已选的 ' + dnm.length + ' 个工具。同步后 Cursor 侧不再可用，且不可撤销。',
+        confirmLabel: '删除 ' + dnm.length + ' 个工具'
+      }).then(function (ok) {
+        if (!ok) return;
+        var hbDel = (state.mcpViewDataset && state.mcpViewDataset.hostByTool) || {};
+        var removed = 0;
+        var dj;
+        for (dj = 0; dj < dnm.length; dj++) {
+          var tn = dnm[dj];
+          var hh = hbDel[tn] || location.hostname;
+          if (deleteMcpToolFromHost(hh, tn)) removed++;
+        }
+        state.selectedMcpToolNames = {};
+        if (state.mcpListUi) {
+          state.mcpListUi.selectedToolName = null;
+          state.mcpListUi.inspectorOpen = false;
+        }
+        state.mcpViewDataset = null;
+        chrome.runtime.sendMessage({ type: 'MCP_SYNC_TOOLS' }, function () {
+          patchMcpToolListSection(mcpContent);
+          showToast(removed > 0 ? '已删除 ' + removed + ' 个工具' : '未删除任何工具', 2500, removed > 0 ? 'success' : 'warning');
+        });
+      });
     });
   }
 
   if (state.mcpPanelTab === 'logs') {
+    var logCloseBtn = mcpContent.querySelector('.ai-req-mcp-log-inspector-close-btn');
+    if (logCloseBtn && !logCloseBtn._bound) {
+      logCloseBtn._bound = true;
+      logCloseBtn.addEventListener('click', function (e) {
+        e.stopPropagation();
+        renderMcpLogInspector(mcpContent, null);
+        syncMcpLogInspectorLayout(mcpContent);
+        var rows = mcpContent.querySelectorAll('.ai-req-mcp-log-row');
+        for (var ri = 0; ri < rows.length; ri++) rows[ri].classList.remove('ai-req-mcp-row-selected');
+      });
+    }
     chrome.runtime.sendMessage({ type: 'MCP_GET_CALL_LOGS' }, function (resp) {
       var logs = (resp && resp.logs) || [];
       var logListEl = mcpContent.querySelector('.ai-req-mcp-log-list');
+      var logHead = mcpContent.querySelector('.ai-req-mcp-log-table-head');
       if (!logListEl) return;
       logListEl.innerHTML = '';
       if (logs.length === 0) {
-        logListEl.innerHTML = '<div class="ai-req-mcp-empty">\u6682\u65E0\u8C03\u7528\u65E5\u5FD7</div>';
+        if (logHead) logHead.style.display = 'none';
+        logListEl.innerHTML = '<div class="ai-req-mcp-empty">暂无调用日志</div>';
+        renderMcpLogInspector(mcpContent, null);
         return;
       }
+      if (logHead) logHead.style.display = 'grid';
       for (var li = logs.length - 1; li >= 0; li--) {
-        var log = logs[li];
-        var date = new Date(log.timestamp || Date.now());
-        var timeStr = pad2(date.getHours()) + ':' + pad2(date.getMinutes()) + ':' + pad2(date.getSeconds());
-        var logItem = document.createElement('div');
-        logItem.className = 'ai-req-mcp-log-item';
-        var timeSpan = document.createElement('span');
-        timeSpan.className = 'ai-req-mcp-log-time';
-        timeSpan.textContent = timeStr;
-        var toolSpan = document.createElement('span');
-        toolSpan.className = 'ai-req-mcp-log-tool';
-        toolSpan.textContent = log.toolName || '';
-        var statusSpan = document.createElement('span');
-        statusSpan.className = 'ai-req-mcp-log-status';
-        statusSpan.textContent = String(log.status || 0);
-        var durSpan = document.createElement('span');
-        durSpan.className = 'ai-req-mcp-log-duration';
-        durSpan.textContent = (log.duration || 0) + 'ms';
-        var errSpan = document.createElement('span');
-        errSpan.className = 'ai-req-mcp-log-error';
-        errSpan.textContent = log.error || '';
-        logItem.appendChild(timeSpan);
-        logItem.appendChild(toolSpan);
-        logItem.appendChild(statusSpan);
-        logItem.appendChild(durSpan);
-        if (log.error) logItem.appendChild(errSpan);
-        (function (logEntry) {
+        (function (logEntry, idx) {
+          var date = new Date(logEntry.timestamp || Date.now());
+          var timeStr = pad2(date.getHours()) + ':' + pad2(date.getMinutes()) + ':' + pad2(date.getSeconds());
+          var logItem = document.createElement('div');
+          logItem.className = 'ai-req-mcp-log-row';
+          logItem.setAttribute('data-log-index', String(idx));
+          logItem.innerHTML =
+            '<span class="ai-req-mcp-log-time">' + escapeHtml(timeStr) + '</span>' +
+            '<span class="ai-req-mcp-log-tool" title="' + escapeHtml(logEntry.toolName || '') + '">' + escapeHtml(logEntry.toolName || '') + '</span>' +
+            '<span class="ai-req-mcp-log-status' + (logEntry.error ? ' error' : ' success') + '">' + escapeHtml(String(logEntry.status || 0)) + '</span>' +
+            '<span class="ai-req-mcp-log-duration">' + escapeHtml(String(logEntry.duration || 0) + 'ms') + '</span>' +
+            '<span class="ai-req-mcp-log-error">' + escapeHtml(logEntry.error || '-') + '</span>';
           logItem.addEventListener('click', function () {
-            var expanded = logItem.querySelector('.ai-req-mcp-log-detail');
-            if (expanded) {
-              expanded.remove();
-              return;
+            var rows = mcpContent.querySelectorAll('.ai-req-mcp-log-row');
+            for (var ri = 0; ri < rows.length; ri++) {
+              rows[ri].classList.toggle('ai-req-mcp-row-selected', rows[ri] === logItem);
             }
-            var detail = document.createElement('div');
-            detail.className = 'ai-req-mcp-log-detail';
-            var argsDiv = document.createElement('div');
-            argsDiv.className = 'ai-req-mcp-log-detail-section';
-            argsDiv.innerHTML = '<div class="ai-req-mcp-log-detail-label">\u8BF7\u6C42\u53C2\u6570</div>';
-            var argsPre = document.createElement('pre');
-            argsPre.className = 'ai-req-mcp-log-detail-code';
-            try {
-              argsPre.textContent = JSON.stringify(JSON.parse(logEntry.argsSummary || '{}'), null, 2);
-            } catch (e) {
-              argsPre.textContent = logEntry.argsSummary || '';
-            }
-            argsDiv.appendChild(argsPre);
-            detail.appendChild(argsDiv);
-            var modeDiv = document.createElement('div');
-            modeDiv.className = 'ai-req-mcp-log-detail-section';
-            modeDiv.innerHTML = '<div class="ai-req-mcp-log-detail-label">\u4EE3\u7406\u6A21\u5F0F</div><div>' + escapeHtml(logEntry.proxyMode || '') + '</div>';
-            detail.appendChild(modeDiv);
-            logItem.appendChild(detail);
+            renderMcpLogInspector(mcpContent, logEntry);
+            syncMcpLogInspectorLayout(mcpContent);
           });
-        })(log);
-        logListEl.appendChild(logItem);
+          logListEl.appendChild(logItem);
+        })(logs[li], li);
       }
     });
   }
@@ -970,24 +1231,54 @@ function bindMcpContentEvents(mcpContent) {
   }
 }
 
-function refreshMcpStatusBar(mcpContent) {
-  var dotEl = mcpContent.querySelector('.ai-req-mcp-status-dot');
-  var textEl = mcpContent.querySelector('.ai-req-mcp-status-text');
-  var btnEl = mcpContent.querySelector('.ai-req-mcp-start-btn');
-  if (!dotEl || !textEl || !btnEl) return;
+function applyMcpStatusBarState(mcpContent, resp) {
+  if (!mcpContent) return;
+  var bars = mcpContent.querySelectorAll('.ai-req-mcp-status-bar');
+  if (!bars.length) return;
+  var bi;
+  for (bi = 0; bi < bars.length; bi++) {
+    var bar = bars[bi];
+    var dotEl = bar.querySelector('.ai-req-mcp-status-dot');
+    var textEl = bar.querySelector('.ai-req-mcp-status-text');
+    var btnEl = bar.querySelector('.ai-req-mcp-start-btn');
+    if (!dotEl || !textEl || !btnEl) continue;
 
-  chrome.runtime.sendMessage({ type: 'MCP_GET_STATUS' }, function (resp) {
-    if (resp && resp.helperConnected) {
+    if (resp && resp.serverStarting) {
+      dotEl.className = 'ai-req-mcp-status-dot ai-req-mcp-status-dot-warn';
+      textEl.textContent = 'MCP \u25D0 \u542F\u52A8\u4E2D\u2026';
+      btnEl.textContent = '\u542F\u52A8';
+      btnEl.className = 'ai-req-mcp-start-btn';
+      continue;
+    }
+
+    if (resp && resp.helperConnected && resp.httpReady) {
+      var port = resp.serverPort || 9527;
+      var mcpUrl = resp.mcpUrl || ('http://127.0.0.1:' + port + '/mcp');
       dotEl.className = 'ai-req-mcp-status-dot ai-req-mcp-status-dot-on';
-      textEl.textContent = 'MCP \u25CF \u5DF2\u542F\u52A8 ws://localhost:' + (resp.serverPort || 9527);
+      textEl.textContent = 'MCP \u25CF \u5DF2\u542F\u52A8 ' + mcpUrl;
+      btnEl.textContent = '\u505C\u6B62';
+      btnEl.className = 'ai-req-mcp-start-btn ai-req-mcp-stop-btn';
+    } else if (resp && resp.helperConnected && !resp.httpReady) {
+      dotEl.className = 'ai-req-mcp-status-dot ai-req-mcp-status-dot-warn';
+      textEl.textContent =
+        'MCP \u25D0 Helper \u5DF2\u8FDE\u63A5\uFF0CHTTP \u672A\u5C31\u7EEA' +
+        (resp.httpError ? '\uFF08' + resp.httpError + '\uFF09' : '');
       btnEl.textContent = '\u505C\u6B62';
       btnEl.className = 'ai-req-mcp-start-btn ai-req-mcp-stop-btn';
     } else {
       dotEl.className = 'ai-req-mcp-status-dot ai-req-mcp-status-dot-off';
-      textEl.textContent = 'MCP \u25CB \u672A\u542F\u52A8' + (resp && resp.helperError ? '\uFF08' + resp.helperError + '\uFF09' : '');
+      textEl.textContent =
+        'MCP \u25CB \u672A\u542F\u52A8' + (resp && resp.helperError ? '\uFF08' + resp.helperError + '\uFF09' : '');
       btnEl.textContent = '\u542F\u52A8';
       btnEl.className = 'ai-req-mcp-start-btn';
     }
+  }
+}
+
+function refreshMcpStatusBar(mcpContent) {
+  if (!mcpContent) return;
+  chrome.runtime.sendMessage({ type: 'MCP_GET_STATUS' }, function (resp) {
+    applyMcpStatusBarState(mcpContent, resp || {});
   });
 }
 

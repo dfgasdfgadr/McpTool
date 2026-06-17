@@ -19,12 +19,6 @@
     createJsonEditor();
     createRewriteEditor();
     startDomGuard();
-
-    if (!state.config.apiKey) {
-      setTimeout(function () {
-        openConfigPanel();
-      }, 500);
-    }
   }
 
   function startDomGuard() {
