@@ -95,6 +95,8 @@ ai_req_field_sources_<hostname>
   stepId: "step_xxx",
   method: "GET",
   url: "/api/user/detail",
+  originalUrl: "https://admin.example.com/api/user/detail?id=1",
+  mockKey: "/api/user/detail",
   jsonPath: "$.data.user.name",
   originalValue: "张三",
   lastMockValue: "李四",
@@ -110,8 +112,42 @@ ai_req_field_sources_<hostname>
 - 字段来源记录只保存轻量元信息，不复制完整响应体。
 - 匹配仍以 `state.requestRecords` 中的响应体为即时数据源。
 - 只有用户确认候选后才保存记录。
+- `requestId` 用于回看历史请求；字段 Mock 生效使用更稳定的 `mockKey + method` 写入 `mockRules`。
+- `mockKey` 与现有 `getMockKey(url)` 保持一致，通常是 pathname。
 
-### 5.2 Mock rule patch 扩展
+### 5.2 候选对象
+
+候选对象是临时 UI 数据，不直接持久化。用户确认候选后，才转换为字段来源记录。
+
+```js
+{
+  candidateId: "candidate_xxx",
+  requestId: "req_xxx",
+  flowId: "flow_xxx",
+  stepId: "step_xxx",
+  method: "GET",
+  url: "/api/user/detail",
+  originalUrl: "https://admin.example.com/api/user/detail?id=1",
+  mockKey: "/api/user/detail",
+  jsonPath: "$.data.user.name",
+  value: "张三",
+  valuePreview: "张三",
+  matchType: "exact",
+  score: 94,
+  confidenceLevel: "high",
+  matchReasons: ["精确匹配", "当前 Flow", "已验证核心请求"],
+  partialSearch: false,
+  truncated: false
+}
+```
+
+说明：
+
+- `partialSearch === true` 表示响应体或节点数超限，候选可能不完整。
+- `truncated === true` 表示展示值经过截断。
+- UI 展示候选对象；保存时只持久化必要字段到 `ai_req_field_sources_<hostname>`。
+
+### 5.3 Mock rule patch 扩展
 
 复用现有 `mockRules`，在 `response` 下新增 `patches`：
 
@@ -133,13 +169,25 @@ response: {
 }
 ```
 
-规则：
+响应生成规则：
 
-- `response.bodyEnabled === true` 时，保留旧行为，替换整个响应体。
-- `response.patches` 存在时，对真实响应体或已改写响应体应用 JSON Path patch。
+- 先计算 base body：
+  - 如果 `response.bodyEnabled === true`，base body 使用 `response.body`。
+  - 否则 base body 使用真实响应体。
+- 再对 base body 依次应用 enabled patches。
+- 因此整响应 Mock 与字段 patch 可以叠加：整响应 body 是 patch 的输入基底，字段 patch 是最终输出前的细粒度覆盖。
 - patch 只支持单字段路径，例如 `$.data.user.name`、`$.data.list[2].name`。
 - 同一路径多个 patch 同时存在时，后创建的 patch 覆盖前一个 patch。
 - `once` 继续复用现有规则语义，可用于“仅下一次生效”。
+- `normalizeRule`、简单 Mock 保存、高级改写保存等所有 rule 读写路径必须保留 `response.patches`。
+- 整响应编辑器不应默认清空 patches，除非用户显式删除字段 patch。
+
+JSON Path 规则：
+
+- 第一版只支持替换已存在路径，不创建新路径。
+- 支持点路径和数组索引：`$.data.user.name`、`$.data.list[2].name`。
+- 对象 key 含 `.`, `[`, `]`, 引号等特殊字符时，第一版不生成 patch，并在候选中标记不支持。
+- 不支持通配符、切片、过滤表达式和批量数组更新。
 
 ## 6. 匹配逻辑
 
@@ -179,7 +227,17 @@ $.data.list[2].name
 
 - `exact`：字段值字符串化后等于选中文本。
 - `contains`：字段值包含选中文本，或选中文本包含字段值。
-- `normalized`：去空白、大小写不敏感、去千分位逗号、轻量数字/日期字符串规范化后匹配。
+- `normalized`：只做确定性文本规范化，不做语义推断。
+
+第一版 normalized 规则限定为：
+
+- 去掉首尾空白。
+- 连续空白合并为一个空格。
+- 英文大小写不敏感。
+- 数字字符串去千分位逗号，例如 `1,234` 与 `1234`。
+- 布尔值字符串大小写不敏感，例如 `True` 与 `true`。
+
+第一版不做日期格式转换，例如不把 `2026/06/22` 与 `2026-06-22` 判定为同一值；这类能力放入后续增强。
 
 ### 6.4 候选评分
 
@@ -267,6 +325,8 @@ patch 应用：
 - 路径不存在时不阻断请求，记录 warning 并 Toast 提示。
 - 响应不是 JSON 时跳过 patch，保留原响应。
 - 多 patch 按创建顺序应用。
+- Response 克隆、JSON 解析、JSON 序列化或 patch 应用失败时，回退原响应并记录 warning。
+- 如果响应 body 已不可消费，跳过 patch，保留原响应并记录 warning。
 
 ## 9. 错误处理
 
@@ -275,8 +335,10 @@ patch 应用：
 - 没有候选：展示“未找到候选字段”，提供“打开最近请求列表”。
 - 多个候选分数接近：不自动选中，要求用户确认。
 - 响应体过大：只遍历前 N 个节点或前 N KB，避免页面卡顿。
+- 超限搜索：候选弹窗提示“仅搜索部分响应，结果可能不完整”。
 - 循环/非 JSON 响应：跳过。
 - JSON Path patch 未命中：不破坏请求，记录 warning。
+- patch 应用失败：回退原响应，记录 warning，不抛出到业务页面。
 - 类型输入错误：不保存 patch。
 - 页面刷新后：字段 Mock 规则继续生效，字段来源记录保留。
 
@@ -291,6 +353,9 @@ patch 应用：
 - 用户确认候选后能生成字段级 Mock patch。
 - 刷新或重放请求后，只修改该字段，其它响应字段不变。
 - 路径不存在、非 JSON、类型输入错误时有明确提示，不破坏请求。
+- 响应体超限时提示候选不完整。
+- patch 应用失败时回退原响应并记录 warning。
+- 整响应 Mock 与字段 patch 可叠加，且整响应编辑不会默认清空 patches。
 - 已有整响应 Mock、请求改写、Flow 录制、MCP 工具不回退。
 
 回归测试：
