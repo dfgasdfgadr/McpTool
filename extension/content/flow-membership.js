@@ -41,6 +41,7 @@ function syncFlowIntoViewDataset(flow) {
   if (state.mcpViewDataset && state.mcpViewDataset.flowsById) {
     state.mcpViewDataset.flowsById[flow.id] = flow;
   }
+  if (flow.hostname === '*') return;
   if (flow.hostname === location.hostname || !flow.hostname) {
     state.flows[flow.id] = flow;
   }
@@ -120,21 +121,88 @@ function appendToolToFlowIndex(flow, toolName) {
   if (flow.mcpToolNames.indexOf(toolName) === -1) flow.mcpToolNames.push(toolName);
 }
 
-function setToolFlowMeta(tool, flow) {
-  if (!tool || !tool._meta) tool._meta = {};
+function setToolFlowMeta(tool, flow, toolHost) {
+  if (!tool) return;
+  if (!tool._meta) tool._meta = {};
   if (!flow) {
     delete tool._meta.flow;
     if (typeof stripFlowTagFromDescription === 'function') stripFlowTagFromDescription(tool);
     return;
   }
+  var flowHost = flow.hostname || location.hostname;
   tool._meta.flow = {
     flowId: flow.id,
     flowName: flow.name,
-    hostname: flow.hostname || location.hostname
+    hostname: flowHost
   };
+  var th = toolHost || (flowHost === '*' ? null : flowHost);
+  if (th) tool._meta.flow.toolHost = th;
   if (typeof applyFlowTagToToolDescription === 'function') {
     applyFlowTagToToolDescription(tool, flow.name);
   }
+}
+
+function canAssignToolToFlow(flow, toolHost) {
+  if (!flow) return false;
+  if (flow.hostname === '*') return true;
+  var fh = flow.hostname || location.hostname;
+  return String(toolHost || '') === String(fh);
+}
+
+function sortToolsByFlowOrder(flow, toolNames) {
+  var order = (flow && flow.mcpToolNames) || [];
+  var rank = {};
+  var i;
+  for (i = 0; i < order.length; i++) rank[order[i]] = i;
+  var inList = (toolNames || []).slice();
+  inList.sort(function (a, b) {
+    var ra = Object.prototype.hasOwnProperty.call(rank, a) ? rank[a] : 999999;
+    var rb = Object.prototype.hasOwnProperty.call(rank, b) ? rank[b] : 999999;
+    if (ra !== rb) return ra - rb;
+    return String(a).localeCompare(String(b));
+  });
+  return inList;
+}
+
+function insertToolsInFlowOrder(flow, toolNames, beforeToolName) {
+  if (!flow) return [];
+  var order = (flow.mcpToolNames || []).slice();
+  var moving = toolNames || [];
+  var cleaned = [];
+  var mi;
+  for (mi = 0; mi < order.length; mi++) {
+    if (moving.indexOf(order[mi]) === -1) cleaned.push(order[mi]);
+  }
+  var insertAt = cleaned.length;
+  if (beforeToolName) {
+    var bi = cleaned.indexOf(beforeToolName);
+    if (bi >= 0) insertAt = bi;
+  }
+  cleaned.splice.apply(cleaned, [insertAt, 0].concat(moving));
+  return cleaned;
+}
+
+function reorderToolsInFlow(flowId, orderedNames, options) {
+  options = options || {};
+  var flow = getFlowById(flowId);
+  if (!flow) return { ok: false, error: 'FLOW_NOT_FOUND' };
+  var valid = [];
+  var seen = {};
+  var i;
+  for (i = 0; i < (orderedNames || []).length; i++) {
+    var n = orderedNames[i];
+    if (seen[n]) continue;
+    seen[n] = true;
+    valid.push(n);
+  }
+  var current = flow.mcpToolNames || [];
+  for (i = 0; i < current.length; i++) {
+    if (!seen[current[i]]) valid.push(current[i]);
+  }
+  flow.mcpToolNames = valid;
+  persistFlowRecord(flow);
+  if (options.sync !== false) syncFlowMembershipAndMcp();
+  return { ok: true, reordered: valid.length };
 }
 
 function assignToolsToFlow(toolNames, targetFlowId, options) {
@@ -143,12 +211,17 @@ function assignToolsToFlow(toolNames, targetFlowId, options) {
   if (!flow) return { ok: false, error: 'FLOW_NOT_FOUND' };
   var names = toolNames || [];
   var moved = 0;
+  var rejected = 0;
   var ni;
   for (ni = 0; ni < names.length; ni++) {
     var toolName = names[ni];
     if (typeof isFlowContextSystemToolName === 'function' && isFlowContextSystemToolName(toolName)) continue;
     var loaded = loadToolForMembership(toolName);
     if (!loaded.tool) continue;
+    if (!canAssignToolToFlow(flow, loaded.host)) {
+      rejected++;
+      continue;
+    }
     var oldFlowId = loaded.tool._meta && loaded.tool._meta.flow && loaded.tool._meta.flow.flowId;
     if (oldFlowId === targetFlowId) continue;
     if (oldFlowId) {
@@ -159,7 +232,7 @@ function assignToolsToFlow(toolNames, targetFlowId, options) {
       }
     }
     appendToolToFlowIndex(flow, toolName);
-    setToolFlowMeta(loaded.tool, flow);
+    setToolFlowMeta(loaded.tool, flow, loaded.host);
     persistToolForMembership(loaded.host, loaded.toolsObj);
     moved++;
   }
@@ -167,7 +240,7 @@ function assignToolsToFlow(toolNames, targetFlowId, options) {
     persistFlowRecord(flow);
     if (options.sync !== false) syncFlowMembershipAndMcp();
   }
-  return { ok: true, moved: moved };
+  return { ok: true, moved: moved, rejected: rejected };
 }
 
 function unassignToolsFromFlow(toolNames, options) {
@@ -211,7 +284,7 @@ function renameFlow(flowId, newName) {
     if (!meta || !meta.flow || meta.flow.flowId !== flowId) continue;
     var loaded = loadToolForMembership(tn);
     if (!loaded.tool) continue;
-    setToolFlowMeta(loaded.tool, flow);
+    setToolFlowMeta(loaded.tool, flow, loaded.host);
     persistToolForMembership(loaded.host, loaded.toolsObj);
   }
   syncFlowMembershipAndMcp();
@@ -318,7 +391,8 @@ function buildFlowTreeGroups(toolsMap, flowsMap, options) {
     if (!flow) continue;
     var title = flow.name || flow.id;
     var subtitle = '';
-    if (nameCounts[title] > 1) subtitle = flow.hostname || '';
+    if (flow.hostname === '*') subtitle = '\u8de8\u7ad9';
+    else if (nameCounts[title] > 1) subtitle = flow.hostname || '';
     var missingRefs = [];
     var mcpNames = flow.mcpToolNames || [];
     var mi;
@@ -331,7 +405,7 @@ function buildFlowTreeGroups(toolsMap, flowsMap, options) {
       subtitle: subtitle,
       flowId: fid,
       kind: inferFlowKind(flow),
-      tools: (byFlowId[fid] || []).sort(),
+      tools: sortToolsByFlowOrder(flow, byFlowId[fid] || []),
       missingRefs: missingRefs,
       flow: flow
     });
@@ -350,7 +424,7 @@ function buildFlowTreeGroups(toolsMap, flowsMap, options) {
       subtitle: (sampleMeta && sampleMeta.hostname) || '',
       flowId: ofid,
       kind: 'recorded',
-      tools: byFlowId[ofid].sort(),
+      tools: (byFlowId[ofid] || []).sort(),
       missingRefs: [],
       flow: null
     });

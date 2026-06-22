@@ -1,7 +1,106 @@
 /** \u7AD9\u70B9\u4E13\u7528\u503C\uFF1A\u5217\u8868\u4E2D\u6392\u9664\u5F53\u524D\u6807\u7B7E\u9875 hostname \u6765\u6E90\u7684 merged \u5DE5\u5177 */
 var MCP_SITE_FILTER_EXCLUDE_CURRENT = '__exclude_current__';
+var MCP_LIST_UI_PREFS_KEY = 'ai_req_mcp_list_ui_prefs';
+var mcpListUiPrefsLoaded = false;
+var mcpListUiPrefsSaveTimer = null;
+
+function loadMcpListUiPrefs() {
+  if (mcpListUiPrefsLoaded) return;
+  mcpListUiPrefsLoaded = true;
+  try {
+    var raw = storageGet(MCP_LIST_UI_PREFS_KEY, null);
+    if (!raw) return;
+    var prefs = JSON.parse(raw);
+    if (!state.mcpListUi) {
+      state.mcpListUi = {
+        keyword: '',
+        viewMode: prefs.viewMode === 'flat' ? 'flat' : 'flowTree',
+        groupMode: 'none',
+        filterEnabled: 'all',
+        riskLevels: {},
+        toolbarCollapsed: false,
+        siteFilter: 'all',
+        selectedToolName: null,
+        selectedFlowId: null,
+        collapsedFlowIds: prefs.collapsedFlowIds && typeof prefs.collapsedFlowIds === 'object'
+          ? prefs.collapsedFlowIds
+          : {},
+        inspectorOpen: false,
+        scrollToFlowId: null
+      };
+      return;
+    }
+    if (prefs.collapsedFlowIds && typeof prefs.collapsedFlowIds === 'object') {
+      state.mcpListUi.collapsedFlowIds = prefs.collapsedFlowIds;
+    }
+    if (prefs.viewMode === 'flowTree' || prefs.viewMode === 'flat') {
+      state.mcpListUi.viewMode = prefs.viewMode;
+    }
+  } catch (e) {}
+}
+
+function saveMcpListUiPrefs() {
+  ensureMcpListUi();
+  try {
+    storageSet(MCP_LIST_UI_PREFS_KEY, JSON.stringify({
+      schemaVersion: 1,
+      collapsedFlowIds: state.mcpListUi.collapsedFlowIds || {},
+      viewMode: state.mcpListUi.viewMode || 'flowTree'
+    }));
+  } catch (e) {}
+}
+
+function scheduleSaveMcpListUiPrefs() {
+  if (mcpListUiPrefsSaveTimer) clearTimeout(mcpListUiPrefsSaveTimer);
+  mcpListUiPrefsSaveTimer = setTimeout(saveMcpListUiPrefs, 300);
+}
+
+function showCreateManualFlowModal(onCreate) {
+  var existing = document.querySelector('.ai-req-flow-create-overlay');
+  if (existing) existing.remove();
+  var overlay = document.createElement('div');
+  overlay.className = 'ai-req-confirm-overlay ai-req-flow-create-overlay';
+  var modal = document.createElement('div');
+  modal.className = 'ai-req-confirm-modal ai-req-flow-create-modal';
+  modal.innerHTML =
+    '<div class="ai-req-confirm-title">\u65b0\u5efa\u6d41\u7a0b</div>' +
+    '<div class="ai-req-flow-create-body">' +
+    '<label class="ai-req-flow-create-label">\u540d\u79f0<input type="text" class="ai-req-flow-create-name" value="\u672a\u547d\u540d\u6d41\u7a0b"></label>' +
+    '<label class="ai-req-flow-create-check"><input type="checkbox" class="ai-req-flow-create-cross">\u8de8\u7ad9\u70b9\u6d41\u7a0b</label>' +
+    '<div class="ai-req-flow-create-hint">\u53ef\u6536\u7eb3\u4efb\u610f\u7ad9\u70b9\u7684\u5de5\u5177</div>' +
+    '</div>' +
+    '<div class="ai-req-confirm-actions">' +
+    '<button type="button" class="ai-req-btn ai-req-btn-secondary ai-req-flow-create-cancel">\u53d6\u6d88</button>' +
+    '<button type="button" class="ai-req-btn ai-req-btn-primary ai-req-flow-create-ok">\u521b\u5efa</button>' +
+    '</div>';
+  overlay.appendChild(modal);
+  if (typeof mountConfirmOverlay === 'function') mountConfirmOverlay(overlay);
+  else document.body.appendChild(overlay);
+  var nameInput = modal.querySelector('.ai-req-flow-create-name');
+  var crossCb = modal.querySelector('.ai-req-flow-create-cross');
+  function closeModal() {
+    overlay.remove();
+  }
+  modal.querySelector('.ai-req-flow-create-cancel').addEventListener('click', closeModal);
+  overlay.addEventListener('click', function (e) {
+    if (e.target === overlay) closeModal();
+  });
+  modal.addEventListener('click', function (e) { e.stopPropagation(); });
+  modal.querySelector('.ai-req-flow-create-ok').addEventListener('click', function () {
+    var name = nameInput ? String(nameInput.value || '').trim() : '';
+    if (!name) name = '\u672a\u547d\u540d\u6d41\u7a0b';
+    var host = crossCb && crossCb.checked ? '*' : location.hostname;
+    closeModal();
+    if (typeof onCreate === 'function') onCreate(name, host);
+  });
+  if (nameInput) {
+    nameInput.focus();
+    nameInput.select();
+  }
+}
 
 function ensureMcpListUi() {
+  loadMcpListUiPrefs();
   if (!state.mcpListUi) {
     state.mcpListUi = {
       keyword: '',
@@ -308,8 +407,14 @@ function buildMcpToolRowHTML(name, tool, opts) {
   var meta = tool._meta || {};
   var isSystemTool = isFlowContextSystemToolName(name) || !!meta.flowContextSystem;
   var isSelected = selectedName === name;
+  var flowId = meta.flow && meta.flow.flowId ? meta.flow.flowId : '';
+  var rowClasses = 'ai-req-mcp-table-row' + (isSelected ? ' ai-req-mcp-row-selected' : '') + (showHostCol ? '' : ' ai-req-mcp-row-no-host') + (isChild ? ' ai-req-mcp-flow-child' : '');
+  if (isChild && !isSystemTool) rowClasses += ' ai-req-mcp-tool-row';
   var html = '';
-  html += '<div class="ai-req-mcp-table-row' + (isSelected ? ' ai-req-mcp-row-selected' : '') + (showHostCol ? '' : ' ai-req-mcp-row-no-host') + (isChild ? ' ai-req-mcp-flow-child' : '') + '" data-tool-name="' + escapeHtml(name) + '">';
+  html += '<div class="' + rowClasses + '" data-tool-name="' + escapeHtml(name) + '"' + (flowId ? ' data-flow-id="' + escapeHtml(flowId) + '"' : '') + '>';
+  if (isChild && !isSystemTool) {
+    html += '<span class="ai-req-mcp-drag-handle" draggable="true" title="拖拽移动或排序">\u22ee\u22ee</span>';
+  }
   if (isSystemTool) {
     html += '<span class="ai-req-mcp-row-cb ai-req-mcp-row-cb-empty"></span>';
   } else {
@@ -374,7 +479,9 @@ function buildMcpFlowTreeHTML() {
     var chevron = collapsed ? '\u25B6' : '\u25BC';
     var kindBadge = '';
     if (isNamedFlow) {
-      kindBadge = '<span class="ai-req-mcp-flow-kind-badge ai-req-mcp-flow-kind-' + escapeHtml(group.kind) + '">' + (group.kind === 'manual' ? '手动' : '录制') + '</span>';
+      var kindLabel = group.kind === 'manual' ? '手动' : '录制';
+      if (group.flow && group.flow.hostname === '*') kindLabel = '手动·跨站';
+      kindBadge = '<span class="ai-req-mcp-flow-kind-badge ai-req-mcp-flow-kind-' + escapeHtml(group.kind) + '">' + kindLabel + '</span>';
     }
     var countLabel = group.tools.length;
     var selectedFlow = ui.selectedFlowId === group.flowId;
@@ -495,7 +602,7 @@ function refreshMcpToolListViewLocal(mcpContent) {
     var hasRows = isFlowTree
       ? Object.keys(getMcpListToolsMap() || {}).length > 0
       : toolNamesAfter.length > 0;
-    tableHead.style.display = hasRows ? 'grid' : 'none';
+    tableHead.style.display = hasRows && !isFlowTree ? 'grid' : 'none';
   }
 }
 
@@ -694,6 +801,7 @@ function bindMcpToolListRowEvents(mcpContent) {
       if (gkey) {
         if (state.mcpListUi.collapsedFlowIds[gkey]) delete state.mcpListUi.collapsedFlowIds[gkey];
         else state.mcpListUi.collapsedFlowIds[gkey] = true;
+        scheduleSaveMcpListUiPrefs();
       }
       if (fid) {
         state.mcpListUi.selectedFlowId = fid;
@@ -1270,6 +1378,7 @@ function bindMcpContentEvents(mcpContent) {
     viewModeSel.addEventListener('change', function () {
       ensureMcpListUi();
       state.mcpListUi.viewMode = viewModeSel.value || 'flowTree';
+      scheduleSaveMcpListUiPrefs();
       syncMcpViewModeToolbar(mcpContent);
       refreshMcpToolListViewLocal(mcpContent);
     });
@@ -1278,16 +1387,16 @@ function bindMcpContentEvents(mcpContent) {
   var flowCreateBtn = mcpContent.querySelector('.ai-req-mcp-flow-create-btn');
   if (flowCreateBtn) {
     flowCreateBtn.addEventListener('click', function () {
-      var name = prompt('新建流程名称', '未命名流程');
-      if (name === null) return;
-      var flow = createManualFlow(name);
-      ensureMcpListUi();
-      state.mcpListUi.selectedFlowId = flow.id;
-      state.mcpListUi.selectedToolName = null;
-      state.mcpListUi.inspectorOpen = true;
-      delete state.mcpListUi.collapsedFlowIds[flow.id];
-      refreshMcpToolListViewLocal(mcpContent);
-      showToast('已创建流程: ' + flow.name, 2500, 'success');
+      showCreateManualFlowModal(function (name, host) {
+        var flow = createManualFlow(name, host);
+        ensureMcpListUi();
+        state.mcpListUi.selectedFlowId = flow.id;
+        state.mcpListUi.selectedToolName = null;
+        state.mcpListUi.inspectorOpen = true;
+        delete state.mcpListUi.collapsedFlowIds[flow.id];
+        refreshMcpToolListViewLocal(mcpContent);
+        showToast('已创建流程: ' + flow.name, 2500, 'success');
+      });
     });
   }
 
@@ -1310,10 +1419,14 @@ function bindMcpContentEvents(mcpContent) {
         showToast('移动失败: ' + (result.error || 'unknown'), 3000, 'error');
         return;
       }
+      if (result.rejected > 0) {
+        showToast('已移动 ' + result.moved + ' 个，' + result.rejected + ' 个因站点不匹配跳过', 3000, 'warning');
+      } else if (result.moved > 0) {
+        showToast('已移动 ' + result.moved + ' 个工具', 2500, 'success');
+      }
       state.selectedMcpToolNames = {};
       if (sel) sel.value = '';
       refreshMcpToolListViewLocal(mcpContent);
-      showToast('已移动 ' + result.moved + ' 个工具', 2500, 'success');
     });
   }
 
@@ -1669,6 +1782,10 @@ function bindMcpContentEvents(mcpContent) {
 
   if (state.mcpPanelTab === 'localExports') {
     bindLocalExportsPanelEvents(mcpContent);
+  }
+
+  if (state.mcpPanelTab === 'list' && typeof initMcpFlowDnD === 'function') {
+    initMcpFlowDnD(mcpContent);
   }
 }
 

@@ -131,13 +131,41 @@ function inferFlowKind(flow) {
   return 'manual';
 }
 
-function countFlowTools(flow, toolsObj) {
-  var names = (flow && flow.mcpToolNames) || [];
-  var n = 0;
-  for (var i = 0; i < names.length; i++) {
-    if (toolsObj && toolsObj[names[i]]) n++;
+function lookupToolDefAcrossHosts(toolName, toolsByHost, meta) {
+  var th = meta && meta.toolHost;
+  if (th && toolsByHost && toolsByHost[th] && toolsByHost[th][toolName]) {
+    return { def: toolsByHost[th][toolName], toolHost: th };
   }
-  return n;
+  if (meta && meta.flow && meta.flow.toolHost && toolsByHost && toolsByHost[meta.flow.toolHost]) {
+    var viaMeta = toolsByHost[meta.flow.toolHost][toolName];
+    if (viaMeta) return { def: viaMeta, toolHost: meta.flow.toolHost };
+  }
+  if (!toolsByHost) return { def: null, toolHost: th || null };
+  var host;
+  for (host in toolsByHost) {
+    if (!Object.prototype.hasOwnProperty.call(toolsByHost, host)) continue;
+    if (toolsByHost[host][toolName]) {
+      return { def: toolsByHost[host][toolName], toolHost: host };
+    }
+  }
+  return { def: null, toolHost: th || null };
+}
+
+function countFlowTools(flow, toolsObj, toolsByHost) {
+  var names = (flow && flow.mcpToolNames) || [];
+  var isCross = flow && flow.hostname === '*';
+  if (isCross && toolsByHost) {
+    var n = 0;
+    for (var i = 0; i < names.length; i++) {
+      if (lookupToolDefAcrossHosts(names[i], toolsByHost, null).def) n++;
+    }
+    return n;
+  }
+  var n2 = 0;
+  for (var j = 0; j < names.length; j++) {
+    if (toolsObj && toolsObj[names[j]]) n2++;
+  }
+  return n2;
 }
 
 function handleListRecordedFlows(dataset) {
@@ -151,18 +179,22 @@ function handleListRecordedFlows(dataset) {
   for (var i = 0; i < list.length; i++) {
     var entry = list[i];
     var flow = entry.flow;
-    var toolsObj = (dataset.toolsByHost && dataset.toolsByHost[entry.hostname]) || {};
+    var isCross = entry.hostname === '*';
+    var toolsObj = isCross ? null : ((dataset.toolsByHost && dataset.toolsByHost[entry.hostname]) || {});
     var kind = inferFlowKind(flow);
+    var summary = kind === 'manual'
+      ? (isCross ? '跨站点手动工具分组' : '手动工具分组')
+      : ((flow.name || flow.id) + ' 相关流程');
     flows.push({
       id: flow.id,
       name: flow.name || flow.id,
       hostname: entry.hostname,
       kind: kind,
       toolCount: ((flow.mcpToolNames || []).length),
-      linkedToolCount: countFlowTools(flow, toolsObj),
+      linkedToolCount: countFlowTools(flow, toolsObj, dataset.toolsByHost),
       stepCount: (flow.steps || []).length,
       updatedAt: flow.endedAt || flow.startedAt || 0,
-      summary: kind === 'manual' ? '手动工具分组' : ((flow.name || flow.id) + ' 相关流程')
+      summary: summary
     });
   }
   if (flows.length === 0) {
@@ -213,7 +245,7 @@ function extractStepRefsFromToolMeta(meta) {
   return refs;
 }
 
-function buildFlowToolEntry(toolName, toolDef) {
+function buildFlowToolEntry(toolName, toolDef, toolHost) {
   if (!toolDef) {
     return {
       name: toolName,
@@ -240,20 +272,28 @@ function buildFlowToolEntry(toolName, toolDef) {
     stepRefs: extractStepRefsFromToolMeta(meta),
     status: status
   };
+  var th = toolHost || (meta.flow && meta.flow.toolHost) || null;
+  if (th) entry.toolHost = th;
   if (warning) entry.warning = warning;
   return entry;
 }
 
-function buildReferenceSteps(flow, toolsObj) {
+function buildReferenceSteps(flow, toolsObj, allToolsByHost) {
   var steps = (flow && flow.steps) || [];
   var toolNames = (flow && flow.mcpToolNames) || [];
+  var isCross = flow && flow.hostname === '*';
   var out = [];
   for (var si = 0; si < steps.length; si++) {
     var step = steps[si];
     var stepToolNames = [];
     for (var ti = 0; ti < toolNames.length; ti++) {
       var tn = toolNames[ti];
-      var toolDef = toolsObj[tn];
+      var toolDef = null;
+      if (isCross && allToolsByHost) {
+        toolDef = lookupToolDefAcrossHosts(tn, allToolsByHost, null).def;
+      } else {
+        toolDef = toolsObj[tn];
+      }
       if (!toolDef) continue;
       var refs = extractStepRefsFromToolMeta(toolDef._meta || {});
       if (refs.indexOf(step.index) >= 0 && stepToolNames.indexOf(tn) < 0) {
@@ -269,31 +309,49 @@ function buildReferenceSteps(flow, toolsObj) {
   return out;
 }
 
-function assembleFlowContext(entry, toolsObj) {
+function assembleFlowContext(entry, toolsObj, allToolsByHost) {
   var flow = entry.flow;
   var kind = inferFlowKind(flow);
+  var isCross = entry.hostname === '*' || (flow && flow.hostname === '*');
   var toolNames = (flow.mcpToolNames || []).slice();
   var tools = [];
   var warnings = [];
   for (var i = 0; i < toolNames.length; i++) {
-    tools.push(buildFlowToolEntry(toolNames[i], toolsObj[toolNames[i]]));
+    var tn = toolNames[i];
+    var toolDef = null;
+    var toolHost = null;
+    if (isCross && allToolsByHost) {
+      var hit = lookupToolDefAcrossHosts(tn, allToolsByHost, null);
+      toolDef = hit.def;
+      toolHost = hit.toolHost;
+      if (toolDef && toolDef._meta && toolDef._meta.flow && toolDef._meta.flow.toolHost) {
+        toolHost = toolDef._meta.flow.toolHost;
+      }
+    } else {
+      toolDef = toolsObj && toolsObj[tn];
+      toolHost = entry.hostname;
+    }
+    tools.push(buildFlowToolEntry(tn, toolDef, toolHost));
   }
   if (toolNames.length === 0) {
     warnings.push('该流程尚未生成 MCP 工具，AI 只能参考步骤，不能直接调用相关接口。');
   }
-  var guidance = FLOW_CONTEXT_GUIDANCE;
+  var guidance = FLOW_CONTEXT_GUIDANCE + ' 工具列表按推荐调用顺序排列，请优先按序使用。';
   if (kind === 'manual') {
-    guidance += ' 此流程为手动工具分组，无录制步骤。';
+    guidance += isCross ? ' 此流程为跨站点手动工具分组，无录制步骤。' : ' 此流程为手动工具分组，无录制步骤。';
   }
+  var summary = kind === 'manual'
+    ? (isCross ? '跨站点手动工具分组' : '手动工具分组')
+    : ((flow.name || '未命名流程') + ' 相关流程');
   return {
     schemaVersion: 1,
     id: flow.id,
     name: flow.name || flow.id,
     hostname: entry.hostname,
     kind: kind,
-    summary: kind === 'manual' ? '手动工具分组' : ((flow.name || '未命名流程') + ' 相关流程'),
+    summary: summary,
     tools: tools,
-    referenceSteps: kind === 'manual' ? [] : buildReferenceSteps(flow, toolsObj),
+    referenceSteps: kind === 'manual' ? [] : buildReferenceSteps(flow, toolsObj, allToolsByHost),
     guidance: guidance,
     warnings: warnings.length ? warnings : undefined
   };
@@ -333,10 +391,11 @@ function handleGetRecordedFlowContext(dataset, toolArguments) {
     };
   }
   var hit = query.matches[0];
-  var hostTools = (dataset.toolsByHost && dataset.toolsByHost[hit.hostname]) || {};
+  var isCross = hit.hostname === '*';
+  var hostTools = isCross ? null : ((dataset.toolsByHost && dataset.toolsByHost[hit.hostname]) || {});
   return {
     ok: true,
-    flow: assembleFlowContext(hit, hostTools)
+    flow: assembleFlowContext(hit, hostTools, isCross ? dataset.toolsByHost : null)
   };
 }
 

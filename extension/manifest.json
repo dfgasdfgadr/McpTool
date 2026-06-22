@@ -27,6 +27,7 @@
         "content/mcp-engine.js",
         "content/flow-membership.js",
         "content/ui-core.js",
+        "content/mcp-flow-dnd.js",
         "content/mcp-ui.js",
         "content/isolated.js"
       ],
