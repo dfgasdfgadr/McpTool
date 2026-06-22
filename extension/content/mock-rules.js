@@ -42,6 +42,30 @@ function normalizeRemoveList(list) {
   return list.map(function (item) { return String(item).trim(); }).filter(Boolean);
 }
 
+function normalizeResponsePatch(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  if (!raw.jsonPath || typeof raw.jsonPath !== 'string') return null;
+  return {
+    id: raw.id || ('patch_' + Date.now().toString(36)),
+    enabled: raw.enabled !== false,
+    jsonPath: raw.jsonPath,
+    value: raw.value,
+    valueType: raw.valueType || 'string',
+    sourceId: raw.sourceId || '',
+    createdAt: raw.createdAt || Date.now()
+  };
+}
+
+function normalizeResponsePatches(list) {
+  if (!Array.isArray(list)) return [];
+  var out = [];
+  for (var i = 0; i < list.length; i++) {
+    var p = normalizeResponsePatch(list[i]);
+    if (p) out.push(p);
+  }
+  return out;
+}
+
 function normalizeRule(raw, key, method) {
   if (!isDebugRule(raw)) {
     return {
@@ -56,7 +80,8 @@ function normalizeRule(raw, key, method) {
         headersSet: { 'Content-Type': 'application/json' },
         headersRemove: [],
         bodyEnabled: true,
-        body: raw
+        body: raw,
+        patches: []
       }
     };
   }
@@ -83,9 +108,54 @@ function normalizeRule(raw, key, method) {
       headersSet: normalizeHeaders(response.headersSet || { 'Content-Type': 'application/json' }),
       headersRemove: normalizeRemoveList(response.headersRemove),
       bodyEnabled: response.bodyEnabled === true,
-      body: response.body
+      body: response.body,
+      patches: normalizeResponsePatches(response.patches)
     }
   };
+}
+
+function hasResponsePatches(rule) {
+  return !!(rule && rule.response && Array.isArray(rule.response.patches) && rule.response.patches.length);
+}
+
+function getEnabledResponsePatches(rule) {
+  if (!hasResponsePatches(rule)) return [];
+  return rule.response.patches.filter(function (p) { return p && p.enabled !== false; });
+}
+
+function applyResponsePatchesToObject(baseBody, patches) {
+  var warnings = [];
+  if (baseBody === null || typeof baseBody === 'undefined') {
+    return { body: baseBody, warnings: ['NON_JSON_BASE'] };
+  }
+  if (typeof baseBody !== 'object') {
+    return { body: baseBody, warnings: ['NON_JSON_BASE'] };
+  }
+  var body;
+  try {
+    body = JSON.parse(JSON.stringify(baseBody));
+  } catch (eClone) {
+    return { body: baseBody, warnings: ['CLONE_FAILED'] };
+  }
+  if (!patches || !patches.length) return { body: body, warnings: warnings };
+  for (var i = 0; i < patches.length; i++) {
+    var patch = patches[i];
+    if (!patch || patch.enabled === false) continue;
+    if (typeof setValueAtJsonPath === 'function') {
+      var result = setValueAtJsonPath(body, patch.jsonPath, patch.value);
+      if (!result.ok) warnings.push('PATH_NOT_FOUND:' + patch.jsonPath);
+    }
+  }
+  return { body: body, warnings: warnings };
+}
+
+function buildMockedResponseBody(rule, realBody) {
+  var base = (rule && rule.response && rule.response.bodyEnabled === true)
+    ? rule.response.body
+    : realBody;
+  var patches = getEnabledResponsePatches(rule);
+  if (!patches.length) return { body: base, warnings: [] };
+  return applyResponsePatchesToObject(base, patches);
 }
 
 function normalizeAllRules() {
@@ -130,10 +200,46 @@ function removeHeaderCaseInsensitive(headers, name) {
   });
 }
 
+function isUnsafeRequestRewriteHeader(name) {
+  var lower = String(name || '').toLowerCase();
+  return lower === 'host' ||
+    lower === 'cookie' ||
+    lower === 'cookie2' ||
+    lower === 'origin' ||
+    lower === 'referer' ||
+    lower === 'connection' ||
+    lower === 'content-length' ||
+    lower === 'accept-encoding' ||
+    lower.indexOf('sec-') === 0 ||
+    lower.indexOf('proxy-') === 0 ||
+    lower === 'upgrade' ||
+    lower === 'keep-alive' ||
+    lower === 'te' ||
+    lower === 'trailer' ||
+    lower === 'transfer-encoding';
+}
+
+function isUnsafeResponseRewriteHeader(name) {
+  var lower = String(name || '').toLowerCase();
+  return lower === 'content-encoding' ||
+    lower === 'content-length' ||
+    lower === 'transfer-encoding' ||
+    lower === 'connection' ||
+    lower === 'set-cookie' ||
+    lower === 'set-cookie2' ||
+    lower === 'keep-alive' ||
+    lower.indexOf('proxy-') === 0 ||
+    lower === 'trailer' ||
+    lower === 'upgrade';
+}
+
 function applyHeaderRewrite(headers, headersSet, headersRemove) {
   var result = Object.assign({}, headers || {});
   (headersRemove || []).forEach(function (name) { removeHeaderCaseInsensitive(result, name); });
-  Object.keys(headersSet || {}).forEach(function (name) { result[name] = String(headersSet[name]); });
+  Object.keys(headersSet || {}).forEach(function (name) {
+    if (isUnsafeRequestRewriteHeader(name)) return;
+    result[name] = String(headersSet[name]);
+  });
   return result;
 }
 
@@ -156,6 +262,9 @@ function collectHeaders(headers) {
 
 function buildResponseHeaders(rule, baseHeaders) {
   var headers = applyHeaderRewrite(baseHeaders || {}, rule && rule.response ? rule.response.headersSet : {}, rule && rule.response ? rule.response.headersRemove : []);
+  Object.keys(headers || {}).forEach(function (name) {
+    if (isUnsafeResponseRewriteHeader(name)) delete headers[name];
+  });
   if (!Object.keys(headers).length) headers['Content-Type'] = 'application/json';
   return headers;
 }

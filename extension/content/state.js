@@ -148,7 +148,9 @@ var state = {
     collapsedFlowIds: {},
     inspectorOpen: false,
     scrollToFlowId: null
-  }
+  },
+  fieldSources: {},
+  provenanceSelectionReady: false
 };
 
 function loadConfig() {

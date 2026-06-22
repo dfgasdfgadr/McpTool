@@ -22,6 +22,7 @@
       "js": [
         "content/state.js",
         "content/mock-rules.js",
+        "content/field-provenance.js",
         "content/core.js",
         "content/ai-analysis.js",
         "content/mcp-engine.js",

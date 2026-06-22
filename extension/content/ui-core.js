@@ -1,4 +1,4 @@
-function injectStyles() {
+﻿function injectStyles() {
   /* Styles loaded via manifest content_scripts css: content/content.css */
 }
 
@@ -174,7 +174,13 @@ function openMainPanelForFlowRecording() {
 }
 
 function mountConfirmOverlay(overlay) {
-  if (state.mainPanel && state.mainPanel.parentNode) {
+  var hasBlockingOverlay = !!document.querySelector('.ai-req-provenance-overlay');
+  if (
+    state.mainPanel &&
+    state.mainPanel.parentNode &&
+    state.isPanelOpen &&
+    !hasBlockingOverlay
+  ) {
     state.mainPanel.appendChild(overlay);
     return;
   }
@@ -2117,6 +2123,7 @@ function buildDebugTagElement(rule) {
   rule = normalizeRule(rule);
   var tagNames = [];
   if (hasResponseBodyMock(rule)) tagNames.push('Mock');
+  if (hasResponsePatches(rule)) tagNames.push('Patch');
   if (hasRequestRewrite(rule)) tagNames.push('Req');
   if (hasResponseHeaderRewrite(rule)) tagNames.push('ResH');
   if (rule.once) tagNames.push('Once');
@@ -2411,12 +2418,131 @@ function createJsonEditor() {
   state.jsonEditor = editor;
 }
 
-function openRewriteEditor(req) {
+function findJsonPathPositionInFormattedText(jsonText, jsonPath, valueHint) {
+  if (!jsonText || !jsonPath || typeof parseJsonPathSegments !== 'function') return null;
+  var segments = parseJsonPathSegments(jsonPath);
+  if (!segments || !segments.length) return null;
+  var last = segments[segments.length - 1];
+  if (typeof last === 'number') {
+    var bracket = '[' + last + ']';
+    var bIdx = jsonText.indexOf(bracket);
+    if (bIdx < 0) return null;
+    return { start: bIdx, end: bIdx + bracket.length };
+  }
+  var keyPattern = '"' + last + '"';
+  var valStr = valueHint !== null && typeof valueHint !== 'undefined' ? primitiveToMatchString(valueHint) : '';
+  var patterns = [];
+  if (valStr !== '') {
+    patterns.push(keyPattern + ': "' + valStr.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"');
+    patterns.push(keyPattern + ': "' + valStr + '"');
+    if (typeof valueHint === 'number' || typeof valueHint === 'boolean') {
+      patterns.push(keyPattern + ': ' + String(valueHint));
+    }
+  }
+  patterns.push(keyPattern + ':');
+  for (var i = 0; i < patterns.length; i++) {
+    var idx = jsonText.indexOf(patterns[i]);
+    if (idx >= 0) {
+      var lineStart = jsonText.lastIndexOf('\n', idx - 1) + 1;
+      var lineEnd = jsonText.indexOf('\n', idx);
+      if (lineEnd < 0) lineEnd = jsonText.length;
+      return { start: lineStart, end: lineEnd };
+    }
+  }
+  var keyIdx = jsonText.indexOf(keyPattern);
+  if (keyIdx < 0) return null;
+  return { start: keyIdx, end: keyIdx + keyPattern.length };
+}
+
+function focusRewriteBodyAtJsonPath(textarea, jsonText, jsonPath, valueHint) {
+  if (!textarea) return false;
+  var pos = findJsonPathPositionInFormattedText(jsonText, jsonPath, valueHint);
+  if (!pos) return false;
+  var textBefore = jsonText.slice(0, pos.start);
+  var lineNumber = textBefore.split('\n').length;
+  var lineHeight = parseInt(window.getComputedStyle(textarea).lineHeight, 10) || 18;
+  var scrollTop = Math.max(0, (lineNumber - 4) * lineHeight);
+  function applyFocus() {
+    textarea.focus();
+    textarea.scrollTop = scrollTop;
+    textarea.setSelectionRange(pos.start, pos.end);
+  }
+  applyFocus();
+  setTimeout(applyFocus, 60);
+  setTimeout(applyFocus, 180);
+  textarea.classList.remove('ai-req-rewrite-body-located');
+  void textarea.offsetWidth;
+  textarea.classList.add('ai-req-rewrite-body-located');
+  setTimeout(function () {
+    textarea.classList.remove('ai-req-rewrite-body-located');
+  }, 1600);
+  return true;
+}
+
+function fillRewriteEditorContext(editor, req) {
+  if (!editor || !req) return;
+  var methodEl = editor.querySelector('.ai-req-rewrite-origin-method');
+  var urlEl = editor.querySelector('.ai-req-rewrite-origin-url');
+  var statusEl = editor.querySelector('.ai-req-rewrite-origin-status');
+  var reqHeadersEl = editor.querySelector('.ai-req-rewrite-origin-req-headers');
+  var resHeadersEl = editor.querySelector('.ai-req-rewrite-origin-res-headers');
+  var subtitleEl = editor.querySelector('.ai-req-rewrite-subtitle');
+  if (methodEl) methodEl.textContent = (req.method || 'GET').toUpperCase();
+  if (urlEl) urlEl.textContent = req.originalUrl || req.url || '—';
+  if (statusEl) statusEl.textContent = String(req.responseStatus != null ? req.responseStatus : '—');
+  if (reqHeadersEl) reqHeadersEl.textContent = formatJson(req.requestHeaders || {});
+  if (resHeadersEl) resHeadersEl.textContent = formatJson(req.responseHeaders || {});
+  if (subtitleEl) {
+    subtitleEl.textContent = extractRequestPath(req.originalUrl || req.url || '') + ' · HTTP ' + (req.responseStatus || '—');
+  }
+}
+
+function normalizeHeaderNameForCompare(name) {
+  return String(name || '').trim().toLowerCase();
+}
+
+function isUnsafeRequestHeaderForRewrite(name) {
+  var lower = normalizeHeaderNameForCompare(name);
+  return /^(host|cookie|cookie2|origin|referer|connection|content-length|accept-encoding|sec-|proxy-|upgrade|keep-alive|te|trailer|transfer-encoding)$/.test(lower);
+}
+
+function isUnsafeResponseHeaderForRewrite(name) {
+  var lower = normalizeHeaderNameForCompare(name);
+  return /^(content-encoding|content-length|transfer-encoding|connection|set-cookie|set-cookie2|keep-alive|proxy-|trailer|upgrade)$/i.test(lower);
+}
+
+function mergeRewriteDraftHeaders(baseHeaders, overrideHeaders) {
+  var merged = Object.assign({}, baseHeaders || {});
+  Object.keys(overrideHeaders || {}).forEach(function (name) {
+    merged[name] = overrideHeaders[name];
+  });
+  return merged;
+}
+
+function buildHeaderOverrideDiff(draftHeaders, originalHeaders, kind) {
+  var originalByLower = {};
+  Object.keys(originalHeaders || {}).forEach(function (name) {
+    originalByLower[normalizeHeaderNameForCompare(name)] = String(originalHeaders[name]);
+  });
+  var diff = {};
+  Object.keys(draftHeaders || {}).forEach(function (name) {
+    if (kind === 'request' && isUnsafeRequestHeaderForRewrite(name)) return;
+    if (kind === 'response' && isUnsafeResponseHeaderForRewrite(name)) return;
+    var lower = normalizeHeaderNameForCompare(name);
+    var value = draftHeaders[name];
+    if (String(value) !== originalByLower[lower]) diff[name] = value;
+  });
+  return diff;
+}
+
+function openRewriteEditor(req, options) {
+  options = options || {};
   state.selectedRewriteReqId = req.id;
   var editor = state.rewriteEditor;
   var overlay = editor.querySelector('.ai-req-rewrite-editor-overlay');
   var key = getMockKey(req.originalUrl || req.url);
-  var rule = state.mockRules[key] ? normalizeRule(state.mockRules[key], key, req.method) : normalizeRule({
+  var hasExistingRule = !!state.mockRules[key];
+  var rule = hasExistingRule ? normalizeRule(state.mockRules[key], key, req.method) : normalizeRule({
     __aiReqRule: true,
     enabled: true,
     once: false,
@@ -2435,16 +2561,34 @@ function openRewriteEditor(req) {
   editor.querySelector('.ai-req-rewrite-enabled').value = rule.enabled ? 'true' : 'false';
   editor.querySelector('.ai-req-rewrite-once').value = rule.once ? 'true' : 'false';
   editor.querySelector('.ai-req-rewrite-method').value = rule.match.method || (req.method || '').toUpperCase();
-  editor.querySelector('.ai-req-rewrite-url').value = rule.request.url || '';
-  editor.querySelector('.ai-req-rewrite-req-headers-set').value = formatJson(rule.request.headersSet || {});
-  editor.querySelector('.ai-req-rewrite-req-headers-remove').value = stringifyRemoveList(rule.request.headersRemove);
+  editor.querySelector('.ai-req-rewrite-url').value = rule.request.url || req.originalUrl || req.url || '';
+  editor.querySelector('.ai-req-rewrite-req-headers-set').value = formatJson(
+    mergeRewriteDraftHeaders(req.requestHeaders || {}, hasExistingRule ? rule.request.headersSet : {})
+  );
   editor.querySelector('.ai-req-rewrite-status').value = rule.response.status || 200;
   editor.querySelector('.ai-req-rewrite-status-text').value = rule.response.statusText || 'OK';
-  editor.querySelector('.ai-req-rewrite-res-headers-set').value = formatJson(rule.response.headersSet || { 'Content-Type': 'application/json' });
-  editor.querySelector('.ai-req-rewrite-res-headers-remove').value = stringifyRemoveList(rule.response.headersRemove);
-  editor.querySelector('.ai-req-rewrite-body-enabled').value = rule.response.bodyEnabled ? 'true' : 'false';
-  editor.querySelector('.ai-req-rewrite-body').value = formatJson(rule.response.body !== undefined ? rule.response.body : req.responseBody);
+  editor.querySelector('.ai-req-rewrite-res-headers-set').value = formatJson(
+    mergeRewriteDraftHeaders(req.responseHeaders || {}, hasExistingRule ? rule.response.headersSet : {})
+  );
+  var bodyEnabled = options.enableBodyMock === true ? true : rule.response.bodyEnabled;
+  editor.querySelector('.ai-req-rewrite-body-enabled').value = bodyEnabled ? 'true' : 'false';
+  var bodySource = rule.response.body !== undefined && rule.response.body !== null
+    ? rule.response.body
+    : req.responseBody;
+  var bodyText = formatJson(bodySource);
+  editor.querySelector('.ai-req-rewrite-body').value = bodyText;
+  fillRewriteEditorContext(editor, req);
   overlay.style.display = 'flex';
+  if (options.focusJsonPath) {
+    requestAnimationFrame(function () {
+      var bodyEl = editor.querySelector('.ai-req-rewrite-body');
+      var focused = focusRewriteBodyAtJsonPath(bodyEl, bodyText, options.focusJsonPath, options.focusValue);
+      if (!focused) {
+        if (bodyEl) bodyEl.focus();
+        showToast('已打开高级改写，但未能定位到字段', 2500, 'warn');
+      }
+    });
+  }
 }
 
 function closeRewriteEditor() {
@@ -2466,7 +2610,12 @@ function applyRewriteRuleFromEditor() {
 
   var editor = state.rewriteEditor;
   var key = getMockKey(req.originalUrl || req.url);
+  var existingRule = state.mockRules[key] ? normalizeRule(state.mockRules[key], key, req.method) : null;
   var bodyEnabled = editor.querySelector('.ai-req-rewrite-body-enabled').value === 'true';
+  var originalUrl = req.originalUrl || req.url || '';
+  var draftUrl = editor.querySelector('.ai-req-rewrite-url').value.trim();
+  var draftReqHeaders = normalizeHeaders(parseJsonObjectInput(editor.querySelector('.ai-req-rewrite-req-headers-set').value, '请求头'));
+  var draftResHeaders = normalizeHeaders(parseJsonObjectInput(editor.querySelector('.ai-req-rewrite-res-headers-set').value, '响应头'));
   var rule = {
     __aiReqRule: true,
     enabled: editor.querySelector('.ai-req-rewrite-enabled').value === 'true',
@@ -2476,17 +2625,18 @@ function applyRewriteRuleFromEditor() {
       method: editor.querySelector('.ai-req-rewrite-method').value.trim().toUpperCase()
     },
     request: {
-      url: editor.querySelector('.ai-req-rewrite-url').value.trim(),
-      headersSet: normalizeHeaders(parseJsonObjectInput(editor.querySelector('.ai-req-rewrite-req-headers-set').value, '请求头')),
-      headersRemove: normalizeRemoveList(editor.querySelector('.ai-req-rewrite-req-headers-remove').value)
+      url: draftUrl === originalUrl ? '' : draftUrl,
+      headersSet: buildHeaderOverrideDiff(draftReqHeaders, req.requestHeaders || {}, 'request'),
+      headersRemove: []
     },
     response: {
       status: parseInt(editor.querySelector('.ai-req-rewrite-status').value, 10) || 200,
       statusText: editor.querySelector('.ai-req-rewrite-status-text').value.trim() || 'OK',
-      headersSet: normalizeHeaders(parseJsonObjectInput(editor.querySelector('.ai-req-rewrite-res-headers-set').value, '响应头')),
-      headersRemove: normalizeRemoveList(editor.querySelector('.ai-req-rewrite-res-headers-remove').value),
+      headersSet: buildHeaderOverrideDiff(draftResHeaders, req.responseHeaders || {}, 'response'),
+      headersRemove: [],
       bodyEnabled: bodyEnabled,
-      body: bodyEnabled ? parseJsonAnyInput(editor.querySelector('.ai-req-rewrite-body').value, '响应体') : null
+      body: bodyEnabled ? parseJsonAnyInput(editor.querySelector('.ai-req-rewrite-body').value, '响应体') : null,
+      patches: existingRule ? (existingRule.response.patches || []) : []
     }
   };
 
@@ -2508,26 +2658,76 @@ function createRewriteEditor() {
   var modal = document.createElement('div');
   modal.className = 'ai-req-rewrite-editor-modal';
   modal.innerHTML = [
-    '<div class="ai-req-rewrite-editor-title">高级改写规则</div>',
-    '<div class="ai-req-rewrite-editor-body">',
-    '  <div class="ai-req-rewrite-grid">',
-    '    <div class="ai-req-rewrite-field"><label class="ai-req-rewrite-label">启用状态</label><select class="ai-req-rewrite-select ai-req-rewrite-enabled"><option value="true">启用</option><option value="false">暂停</option></select></div>',
-    '    <div class="ai-req-rewrite-field"><label class="ai-req-rewrite-label">生效模式</label><select class="ai-req-rewrite-select ai-req-rewrite-once"><option value="false">持久生效</option><option value="true">仅下一次</option></select></div>',
-    '    <div class="ai-req-rewrite-field"><label class="ai-req-rewrite-label">匹配方法</label><input class="ai-req-rewrite-input ai-req-rewrite-method" placeholder="GET / POST，空表示不限"></div>',
-    '    <div class="ai-req-rewrite-field"><label class="ai-req-rewrite-label">响应状态文本</label><input class="ai-req-rewrite-input ai-req-rewrite-status-text" placeholder="OK"></div>',
-    '    <div class="ai-req-rewrite-field ai-req-rewrite-full"><label class="ai-req-rewrite-label">请求地址改写</label><input class="ai-req-rewrite-input ai-req-rewrite-url" placeholder="留空表示不改写请求地址"><div class="ai-req-rewrite-help">跨域地址可能触发浏览器 CORS 限制。</div></div>',
-    '    <div class="ai-req-rewrite-field"><label class="ai-req-rewrite-label">新增/覆盖请求头 JSON</label><textarea class="ai-req-rewrite-textarea ai-req-rewrite-req-headers-set"></textarea></div>',
-    '    <div class="ai-req-rewrite-field"><label class="ai-req-rewrite-label">删除请求头</label><textarea class="ai-req-rewrite-textarea ai-req-rewrite-req-headers-remove" placeholder="每行一个 header 名"></textarea></div>',
-    '    <div class="ai-req-rewrite-field"><label class="ai-req-rewrite-label">响应状态码</label><input class="ai-req-rewrite-input ai-req-rewrite-status" type="number" min="100" max="599"></div>',
-    '    <div class="ai-req-rewrite-field"><label class="ai-req-rewrite-label">是否 Mock 响应体</label><select class="ai-req-rewrite-select ai-req-rewrite-body-enabled"><option value="true">Mock 响应体</option><option value="false">不改响应体</option></select></div>',
-    '    <div class="ai-req-rewrite-field"><label class="ai-req-rewrite-label">新增/覆盖响应头 JSON</label><textarea class="ai-req-rewrite-textarea ai-req-rewrite-res-headers-set"></textarea></div>',
-    '    <div class="ai-req-rewrite-field"><label class="ai-req-rewrite-label">删除响应头</label><textarea class="ai-req-rewrite-textarea ai-req-rewrite-res-headers-remove" placeholder="每行一个 header 名"></textarea></div>',
-    '    <div class="ai-req-rewrite-field ai-req-rewrite-full"><label class="ai-req-rewrite-label">响应体 JSON</label><textarea class="ai-req-rewrite-textarea ai-req-rewrite-body" style="min-height:180px"></textarea></div>',
+    '<div class="ai-req-rewrite-header">',
+    '  <div class="ai-req-rewrite-header-main">',
+    '    <div class="ai-req-rewrite-editor-title">高级改写</div>',
+    '    <div class="ai-req-rewrite-subtitle">—</div>',
+    '  </div>',
+    '  <button type="button" class="ai-req-rewrite-close" aria-label="关闭">×</button>',
+    '</div>',
+    '<div class="ai-req-rewrite-toolbar">',
+    '  <div class="ai-req-rewrite-toolbar-field">',
+    '    <label class="ai-req-rewrite-label">启用</label>',
+    '    <select class="ai-req-rewrite-select ai-req-rewrite-enabled"><option value="true">启用</option><option value="false">暂停</option></select>',
+    '  </div>',
+    '  <div class="ai-req-rewrite-toolbar-field">',
+    '    <label class="ai-req-rewrite-label">生效</label>',
+    '    <select class="ai-req-rewrite-select ai-req-rewrite-once"><option value="false">持久</option><option value="true">仅一次</option></select>',
+    '  </div>',
+    '  <div class="ai-req-rewrite-toolbar-field">',
+    '    <label class="ai-req-rewrite-label">匹配方法</label>',
+    '    <input class="ai-req-rewrite-input ai-req-rewrite-method" placeholder="GET">',
     '  </div>',
     '</div>',
+    '<div class="ai-req-rewrite-editor-body">',
+    '  <section class="ai-req-rewrite-section">',
+    '    <div class="ai-req-rewrite-section-head">',
+    '      <span class="ai-req-rewrite-section-title">请求改写</span>',
+    '      <span class="ai-req-rewrite-section-hint">已回填真实请求，可直接编辑草稿</span>',
+    '    </div>',
+    '    <div class="ai-req-rewrite-grid">',
+    '      <div class="ai-req-rewrite-field ai-req-rewrite-full">',
+    '        <label class="ai-req-rewrite-label">请求地址</label>',
+    '        <input class="ai-req-rewrite-input ai-req-rewrite-url" placeholder="真实请求地址">',
+    '        <div class="ai-req-rewrite-help">默认回填真实 URL；保存时若未修改，会自动视为“不改写请求地址”。跨域地址可能触发 CORS 限制。</div>',
+    '      </div>',
+    '      <div class="ai-req-rewrite-field ai-req-rewrite-full">',
+    '        <label class="ai-req-rewrite-label">请求头 JSON</label>',
+    '        <textarea class="ai-req-rewrite-textarea ai-req-rewrite-req-headers-set ai-req-rewrite-header-editor"></textarea>',
+    '        <div class="ai-req-rewrite-help">默认回填真实请求头。删除某个 key 即表示不再覆盖该 header。</div>',
+    '      </div>',
+    '    </div>',
+    '  </section>',
+    '  <section class="ai-req-rewrite-section ai-req-rewrite-section-response">',
+    '    <div class="ai-req-rewrite-section-head"><span class="ai-req-rewrite-section-title">响应改写</span></div>',
+    '    <div class="ai-req-rewrite-grid">',
+    '      <div class="ai-req-rewrite-field">',
+    '        <label class="ai-req-rewrite-label">状态码</label>',
+    '        <input class="ai-req-rewrite-input ai-req-rewrite-status" type="number" min="100" max="599">',
+    '      </div>',
+    '      <div class="ai-req-rewrite-field">',
+    '        <label class="ai-req-rewrite-label">状态文本</label>',
+    '        <input class="ai-req-rewrite-input ai-req-rewrite-status-text" placeholder="OK">',
+    '      </div>',
+    '      <div class="ai-req-rewrite-field">',
+    '        <label class="ai-req-rewrite-label">响应体</label>',
+    '        <select class="ai-req-rewrite-select ai-req-rewrite-body-enabled"><option value="true">Mock 响应体</option><option value="false">不改写</option></select>',
+    '      </div>',
+    '      <div class="ai-req-rewrite-field ai-req-rewrite-full">',
+    '        <label class="ai-req-rewrite-label">响应头 JSON</label>',
+    '        <textarea class="ai-req-rewrite-textarea ai-req-rewrite-res-headers-set ai-req-rewrite-header-editor"></textarea>',
+    '        <div class="ai-req-rewrite-help">默认回填真实响应头。删除某个 key 即表示不再覆盖该 header。</div>',
+    '      </div>',
+    '      <div class="ai-req-rewrite-field ai-req-rewrite-full ai-req-rewrite-body-field">',
+    '        <label class="ai-req-rewrite-label">响应体 JSON</label>',
+    '        <textarea class="ai-req-rewrite-textarea ai-req-rewrite-body ai-req-rewrite-body-editor"></textarea>',
+    '      </div>',
+    '    </div>',
+    '  </section>',
+    '</div>',
     '<div class="ai-req-rewrite-actions">',
-    '  <button class="ai-req-btn ai-req-btn-secondary ai-req-rewrite-cancel">取消</button>',
-    '  <button class="ai-req-btn ai-req-btn-primary ai-req-rewrite-save">保存规则</button>',
+    '  <button type="button" class="ai-req-btn ai-req-btn-secondary ai-req-rewrite-cancel">取消</button>',
+    '  <button type="button" class="ai-req-btn ai-req-btn-primary ai-req-rewrite-save">保存规则</button>',
     '</div>'
   ].join('');
 
@@ -2536,6 +2736,7 @@ function createRewriteEditor() {
   overlay.addEventListener('click', function (e) {
     if (e.target === overlay) closeRewriteEditor();
   });
+  modal.querySelector('.ai-req-rewrite-close').addEventListener('click', closeRewriteEditor);
   modal.querySelector('.ai-req-rewrite-cancel').addEventListener('click', closeRewriteEditor);
   modal.querySelector('.ai-req-rewrite-save').addEventListener('click', function () {
     try {
@@ -2875,4 +3076,406 @@ function updateAnalyzeProgress() {
     }
   }
   syncShellChrome();
+}
+
+var provenanceTriggerEl = null;
+var provenanceSelectionTimer = null;
+var provenanceDialogEl = null;
+var provenanceSelectedCandidate = null;
+
+function setupPageSelectionProvenance() {
+  if (state.provenanceSelectionReady) return;
+  state.provenanceSelectionReady = true;
+  document.addEventListener('mouseup', onProvenanceMouseUp);
+  document.addEventListener('mousedown', onProvenanceMouseDown);
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') {
+      hideProvenanceTrigger();
+      closeFieldProvenanceDialog();
+    }
+  });
+}
+
+function onProvenanceMouseDown(e) {
+  if (provenanceTriggerEl && e.target && provenanceTriggerEl.contains(e.target)) return;
+  if (provenanceDialogEl && e.target && provenanceDialogEl.contains(e.target)) return;
+  hideProvenanceTrigger();
+}
+
+function onProvenanceMouseUp(e) {
+  if (provenanceSelectionTimer) clearTimeout(provenanceSelectionTimer);
+  provenanceSelectionTimer = setTimeout(function () {
+    updateProvenanceTriggerFromSelection(e);
+  }, 120);
+}
+
+function updateProvenanceTriggerFromSelection(e) {
+  var sel = window.getSelection();
+  if (!sel || sel.isCollapsed || !sel.rangeCount) {
+    hideProvenanceTrigger();
+    return;
+  }
+  var text = (sel.toString() || '').trim();
+  if (!text) {
+    hideProvenanceTrigger();
+    return;
+  }
+  if (e && e.target && isInsideAiReqUi(e.target)) {
+    hideProvenanceTrigger();
+    return;
+  }
+  var anchorNode = sel.anchorNode;
+  var anchorEl = anchorNode && anchorNode.nodeType === 3 ? anchorNode.parentNode : anchorNode;
+  if (anchorEl && isInsideAiReqUi(anchorEl)) {
+    hideProvenanceTrigger();
+    return;
+  }
+  var range = sel.getRangeAt(0);
+  var rect = range.getBoundingClientRect();
+  if (!rect || (rect.width === 0 && rect.height === 0)) {
+    hideProvenanceTrigger();
+    return;
+  }
+  showProvenanceTrigger(rect, text);
+}
+
+function showProvenanceTrigger(rect, text) {
+  hideProvenanceTrigger();
+  var btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'ai-req-provenance-trigger';
+  btn.textContent = '查来源';
+  btn.setAttribute('data-selected-text', text);
+  var top = window.scrollY + rect.top - 36;
+  var left = window.scrollX + rect.left + Math.max(0, rect.width / 2 - 36);
+  if (top < window.scrollY + 8) top = window.scrollY + rect.bottom + 8;
+  btn.style.top = Math.max(8, top) + 'px';
+  btn.style.left = Math.max(8, left) + 'px';
+  btn.addEventListener('mousedown', function (ev) {
+    ev.preventDefault();
+    ev.stopPropagation();
+  });
+  btn.addEventListener('click', function (ev) {
+    ev.preventDefault();
+    ev.stopPropagation();
+    var selected = btn.getAttribute('data-selected-text') || '';
+    hideProvenanceTrigger();
+    openFieldProvenanceForSelection(selected);
+  });
+  safeAppendChild(btn);
+  provenanceTriggerEl = btn;
+}
+
+function hideProvenanceTrigger() {
+  if (provenanceTriggerEl) {
+    provenanceTriggerEl.remove();
+    provenanceTriggerEl = null;
+  }
+}
+
+function openFieldProvenanceForSelection(selectedText) {
+  if (typeof findFieldSourceCandidates !== 'function') {
+    showToast('溯源模块未加载', 2500, 'error');
+    return;
+  }
+  var result = findFieldSourceCandidates(selectedText);
+  openFieldProvenanceDialog(selectedText, result);
+}
+
+function closeFieldProvenanceDialog() {
+  if (provenanceDialogEl) {
+    provenanceDialogEl.remove();
+    provenanceDialogEl = null;
+  }
+  provenanceSelectedCandidate = null;
+}
+
+function provenanceConfidenceLabel(level) {
+  if (level === 'high') return '高';
+  if (level === 'medium') return '中';
+  return '低';
+}
+
+function openFieldProvenanceDialog(selectedText, searchResult) {
+  closeFieldProvenanceDialog();
+  searchResult = searchResult || {
+    selectedText: selectedText,
+    candidates: [],
+    partialSearch: false,
+    truncatedSelection: false
+  };
+  provenanceSelectedCandidate = null;
+
+  var overlay = document.createElement('div');
+  overlay.className = 'ai-req-provenance-overlay';
+  var modal = document.createElement('div');
+  modal.className = 'ai-req-provenance-modal';
+
+  var header = document.createElement('div');
+  header.className = 'ai-req-provenance-header';
+  header.innerHTML =
+    '<div class="ai-req-provenance-title">候选来源</div>' +
+    '<div class="ai-req-provenance-header-actions">' +
+    '  <button type="button" class="ai-req-btn ai-req-btn-danger ai-req-provenance-clear-mocks">清除所有 Mock</button>' +
+    '  <button type="button" class="ai-req-provenance-close" aria-label="关闭">×</button>' +
+    '</div>';
+
+  var summary = document.createElement('div');
+  summary.className = 'ai-req-provenance-summary';
+  var summaryText = '选中文本：「' + escapeHtml(searchResult.selectedText || selectedText || '') + '」';
+  summaryText += ' · 候选 ' + (searchResult.candidates ? searchResult.candidates.length : 0) + ' 条';
+  if (searchResult.truncatedSelection) summaryText += ' · 文本已截断';
+  summary.innerHTML = summaryText +
+    '<div class="ai-req-provenance-disclaimer">以下为候选 JSON 字段，不保证唯一正确来源。</div>';
+
+  if (searchResult.partialSearch) {
+    var warn = document.createElement('div');
+    warn.className = 'ai-req-provenance-warn';
+    warn.textContent = '响应体较大，部分节点未扫描，候选可能不完整。';
+    summary.appendChild(warn);
+  }
+
+  var body = document.createElement('div');
+  body.className = 'ai-req-provenance-body';
+
+  var listWrap = document.createElement('div');
+  listWrap.className = 'ai-req-provenance-list';
+
+  var editorWrap = document.createElement('div');
+  editorWrap.className = 'ai-req-provenance-editor';
+  editorWrap.innerHTML = '<div class="ai-req-provenance-editor-empty">选择一条候选以编辑字段 Mock</div>';
+
+  if (!searchResult.candidates || !searchResult.candidates.length) {
+    listWrap.innerHTML =
+      '<div class="ai-req-provenance-empty">' +
+      '未找到匹配的 JSON 字段。可尝试选中更短的文本，或先触发相关接口请求。' +
+      '<div class="ai-req-provenance-empty-actions">' +
+      '<button type="button" class="ai-req-btn ai-req-btn-secondary ai-req-provenance-open-requests">打开请求列表</button>' +
+      '</div></div>';
+  } else {
+    renderFieldProvenanceCandidates(listWrap, searchResult.candidates, function (candidate) {
+      provenanceSelectedCandidate = candidate;
+      renderFieldMockEditor(editorWrap, candidate, searchResult.selectedText || selectedText);
+    });
+  }
+
+  body.appendChild(listWrap);
+  body.appendChild(editorWrap);
+  modal.appendChild(header);
+  modal.appendChild(summary);
+  modal.appendChild(body);
+  overlay.appendChild(modal);
+  overlay.addEventListener('click', function (e) {
+    if (e.target === overlay) closeFieldProvenanceDialog();
+  });
+  header.querySelector('.ai-req-provenance-close').addEventListener('click', closeFieldProvenanceDialog);
+  header.querySelector('.ai-req-provenance-clear-mocks').addEventListener('click', function (e) {
+    e.stopPropagation();
+    closeFieldProvenanceDialog();
+    setTimeout(clearAllMockRules, 0);
+  });
+
+  var openReqBtn = listWrap.querySelector('.ai-req-provenance-open-requests');
+  if (openReqBtn) {
+    openReqBtn.addEventListener('click', function () {
+      closeFieldProvenanceDialog();
+      if (!state.isPanelOpen) toggleMainPanel();
+      setMainWorkbenchTab('requests');
+    });
+  }
+
+  safeAppendChild(overlay);
+  provenanceDialogEl = overlay;
+}
+
+function renderFieldProvenanceCandidates(listEl, candidates, onSelect) {
+  listEl.innerHTML = '';
+  for (var i = 0; i < candidates.length; i++) {
+    (function (candidate) {
+      var item = document.createElement('button');
+      item.type = 'button';
+      item.className = 'ai-req-provenance-candidate';
+      var pathLine = extractRequestPath(candidate.originalUrl || candidate.url || '');
+      var flowLine = candidate.flowName
+        ? (candidate.flowName + (candidate.flowStepTitle ? ' / ' + candidate.flowStepTitle : ''))
+        : '—';
+      var reasons = (candidate.matchReasons || []).join(' · ');
+      item.innerHTML =
+        '<div class="ai-req-provenance-candidate-top">' +
+        '<span class="ai-req-method-badge ai-req-method-' + escapeHtml((candidate.method || 'GET').toLowerCase()) + '">' + escapeHtml((candidate.method || 'GET').toUpperCase()) + '</span>' +
+        '<span class="ai-req-provenance-candidate-path" title="' + escapeHtml(candidate.originalUrl || candidate.url || '') + '">' + escapeHtml(pathLine) + '</span>' +
+        '<span class="ai-req-provenance-confidence ai-req-provenance-confidence-' + escapeHtml(candidate.confidenceLevel || 'low') + '">' + escapeHtml(provenanceConfidenceLabel(candidate.confidenceLevel)) + '</span>' +
+        '</div>' +
+        '<div class="ai-req-provenance-candidate-pathline">' + escapeHtml(candidate.jsonPath || '') + '</div>' +
+        '<div class="ai-req-provenance-candidate-value">当前值：' + escapeHtml(candidate.valuePreview || '') + '</div>' +
+        '<div class="ai-req-provenance-candidate-meta">Flow：' + escapeHtml(flowLine) + '</div>' +
+        '<div class="ai-req-provenance-candidate-reasons">' + escapeHtml(reasons) + '</div>';
+      item.addEventListener('click', function () {
+        var all = listEl.querySelectorAll('.ai-req-provenance-candidate');
+        for (var j = 0; j < all.length; j++) all[j].classList.remove('ai-req-provenance-candidate-selected');
+        item.classList.add('ai-req-provenance-candidate-selected');
+        onSelect(candidate);
+      });
+      listEl.appendChild(item);
+    })(candidates[i]);
+  }
+  if (candidates.length > 0) {
+    var first = listEl.querySelector('.ai-req-provenance-candidate');
+    if (first) first.classList.add('ai-req-provenance-candidate-selected');
+    onSelect(candidates[0]);
+  }
+}
+
+function renderFieldMockEditor(panelEl, candidate, selectedText) {
+  if (!candidate) return;
+  var valueType = inferValueTypeFromPrimitive(candidate.value);
+  var hasFullMock = false;
+  try {
+    var existingRule = state.mockRules[candidate.mockKey];
+    if (existingRule) {
+      var normalized = normalizeRule(existingRule, candidate.mockKey, candidate.method);
+      hasFullMock = hasResponseBodyMock(normalized);
+    }
+  } catch (eRule) {}
+
+  panelEl.innerHTML = '';
+  var title = document.createElement('div');
+  title.className = 'ai-req-provenance-editor-title';
+  title.textContent = '字段 Mock';
+  panelEl.appendChild(title);
+
+  if (hasFullMock) {
+    var hint = document.createElement('div');
+    hint.className = 'ai-req-provenance-warn';
+    hint.textContent = '该接口已有整响应 Mock，字段 patch 将叠加在其 body 上。';
+    panelEl.appendChild(hint);
+  }
+
+  var origField = document.createElement('div');
+  origField.className = 'ai-req-provenance-field';
+  origField.innerHTML = '<label>原值</label><div class="ai-req-provenance-readonly">' + escapeHtml(primitiveToMatchString(candidate.value)) + '</div>';
+  panelEl.appendChild(origField);
+
+  var typeField = document.createElement('div');
+  typeField.className = 'ai-req-provenance-field';
+  typeField.innerHTML =
+    '<label>类型</label>' +
+    '<select class="ai-req-provenance-value-type">' +
+    '<option value="string">string</option>' +
+    '<option value="number">number</option>' +
+    '<option value="integer">integer</option>' +
+    '<option value="boolean">boolean</option>' +
+    '<option value="null">null</option>' +
+    '<option value="object">object</option>' +
+    '<option value="array">array</option>' +
+    '</select>';
+  panelEl.appendChild(typeField);
+  var typeSel = typeField.querySelector('.ai-req-provenance-value-type');
+  typeSel.value = valueType;
+
+  var valueField = document.createElement('div');
+  valueField.className = 'ai-req-provenance-field ai-req-provenance-value-field';
+  panelEl.appendChild(valueField);
+
+  function renderValueInput() {
+    var t = typeSel.value;
+    if (t === 'object' || t === 'array') {
+      valueField.innerHTML = '<label>新值 (JSON)</label><textarea class="ai-req-provenance-value-input ai-req-provenance-value-json"></textarea>';
+      var ta = valueField.querySelector('.ai-req-provenance-value-json');
+      ta.value = t === 'array'
+        ? (Array.isArray(candidate.value) ? JSON.stringify(candidate.value, null, 2) : '[]')
+        : (candidate.value && typeof candidate.value === 'object' ? JSON.stringify(candidate.value, null, 2) : '{}');
+    } else if (t === 'boolean') {
+      valueField.innerHTML =
+        '<label>新值</label>' +
+        '<select class="ai-req-provenance-value-input ai-req-provenance-value-bool">' +
+        '<option value="true">true</option><option value="false">false</option></select>';
+      var boolSel = valueField.querySelector('.ai-req-provenance-value-bool');
+      boolSel.value = candidate.value === true ? 'true' : 'false';
+    } else if (t === 'null') {
+      valueField.innerHTML = '<label>新值</label><div class="ai-req-provenance-readonly">null</div>';
+    } else {
+      valueField.innerHTML = '<label>新值</label><input type="text" class="ai-req-provenance-value-input ai-req-provenance-value-text">';
+      var inp = valueField.querySelector('.ai-req-provenance-value-text');
+      inp.value = primitiveToMatchString(candidate.value);
+    }
+  }
+  renderValueInput();
+  typeSel.addEventListener('change', renderValueInput);
+
+  var modeField = document.createElement('div');
+  modeField.className = 'ai-req-provenance-field ai-req-provenance-mode-field';
+  modeField.innerHTML =
+    '<label class="ai-req-provenance-once-label"><input type="checkbox" class="ai-req-provenance-once"> 仅下一次请求生效</label>';
+  panelEl.appendChild(modeField);
+
+  var actions = document.createElement('div');
+  actions.className = 'ai-req-provenance-editor-actions';
+  var saveBtn = document.createElement('button');
+  saveBtn.type = 'button';
+  saveBtn.className = 'ai-req-btn ai-req-btn-primary';
+  saveBtn.textContent = '保存字段 Mock';
+  var jumpBtn = document.createElement('button');
+  jumpBtn.type = 'button';
+  jumpBtn.className = 'ai-req-btn ai-req-btn-secondary';
+  jumpBtn.textContent = '打开高级改写';
+  actions.appendChild(saveBtn);
+  actions.appendChild(jumpBtn);
+  panelEl.appendChild(actions);
+
+  saveBtn.addEventListener('click', function () {
+    try {
+      var vt = typeSel.value;
+      var rawVal;
+      if (vt === 'object' || vt === 'array') {
+        rawVal = valueField.querySelector('.ai-req-provenance-value-json').value;
+      } else if (vt === 'boolean') {
+        rawVal = valueField.querySelector('.ai-req-provenance-value-bool').value;
+      } else if (vt === 'null') {
+        rawVal = null;
+      } else {
+        rawVal = valueField.querySelector('.ai-req-provenance-value-text').value;
+      }
+      var once = !!panelEl.querySelector('.ai-req-provenance-once').checked;
+      saveFieldMockFromCandidate(candidate, selectedText, rawVal, vt, once);
+      showToast('字段 Mock 已保存（已固化完整响应），刷新或重放请求验证', 3000, 'success');
+      closeFieldProvenanceDialog();
+    } catch (eSave) {
+      showToast(eSave.message || '保存失败', 3000, 'error');
+    }
+  });
+
+  jumpBtn.addEventListener('click', function () {
+    openRewriteEditorFromProvenance(candidate);
+  });
+}
+
+function openRewriteEditorFromProvenance(candidate) {
+  if (!candidate || !candidate.requestId) {
+    showToast('候选无效', 2500, 'error');
+    return;
+  }
+  var req = findRequestById(candidate.requestId);
+  if (!req) {
+    showToast('无法找到对应请求', 2500, 'error');
+    return;
+  }
+  closeFieldProvenanceDialog();
+  hideProvenanceTrigger();
+  openRewriteEditor(req, {
+    focusJsonPath: candidate.jsonPath,
+    focusValue: candidate.value,
+    enableBodyMock: true
+  });
+}
+
+function jumpToRequestFromProvenance(reqId) {
+  closeFieldProvenanceDialog();
+  hideProvenanceTrigger();
+  if (!state.isPanelOpen) toggleMainPanel();
+  setMainWorkbenchTab('requests');
+  refreshRequestList(undefined, true);
+  renderRequestDetail(reqId);
+  var row = state.mainPanel && state.mainPanel.querySelector('.ai-req-request-item[data-id="' + reqId + '"]');
+  if (row && row.scrollIntoView) row.scrollIntoView({ block: 'nearest' });
 }

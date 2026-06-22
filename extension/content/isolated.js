@@ -5,6 +5,7 @@
       loadMockRules();
       loadMcpTools();
       loadFlows();
+      loadFieldSources();
       setupMenuCommands();
       setupRequestInterception();
     });
@@ -19,6 +20,7 @@
     createConfigPanel();
     createJsonEditor();
     createRewriteEditor();
+    setupPageSelectionProvenance();
     startDomGuard();
   }
 

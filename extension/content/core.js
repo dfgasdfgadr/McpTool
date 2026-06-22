@@ -569,7 +569,7 @@ function interceptXHR() {
           } catch (e) {}
         });
       }
-      var mockMatch = hasResponseBodyMock(rule) ? rule.response.body : null;
+      var mockMatch = hasResponseBodyMock(rule) ? buildMockedResponseBody(rule, rule.response.body).body : null;
       if (hasResponseBodyMock(rule)) {
         reqInfo.isMocked = true;
         reqInfo.mockData = mockMatch;
@@ -624,6 +624,22 @@ function interceptXHR() {
           respBody = self.responseText;
         } catch (e) {}
 
+        var parsedBody = tryParseJson(respBody);
+        var patchWarnings = [];
+        if (rule && hasResponsePatches(rule) && parsedBody && typeof parsedBody === 'object') {
+          var builtBody = buildMockedResponseBody(rule, parsedBody);
+          parsedBody = builtBody.body;
+          patchWarnings = builtBody.warnings || [];
+          try {
+            var patchedJson = JSON.stringify(parsedBody);
+            defineMockXhrResponse(self, patchedJson, parsedBody, reqInfo.url, {
+              status: self.status,
+              statusText: self.statusText || 'OK',
+              headers: respHeaders
+            });
+          } catch (ePatch) {}
+        }
+
         addRequestRecord({
           id: reqInfo.id,
           timestamp: reqInfo.startTime,
@@ -634,12 +650,13 @@ function interceptXHR() {
           requestBody: tryParseJson(reqInfo.requestBody),
           responseStatus: self.status,
           responseHeaders: respHeaders,
-          responseBody: tryParseJson(respBody),
+          responseBody: parsedBody,
           duration: duration,
           aiAnalysis: null,
-          isMocked: false,
-          mockData: null,
-          debugRule: rule
+          isMocked: !!(rule && hasResponsePatches(rule)),
+          mockData: (rule && hasResponsePatches(rule)) ? parsedBody : null,
+          debugRule: rule,
+          patchWarnings: patchWarnings
         });
         consumeOnceRuleByKey(rule && rule._key);
       });
@@ -684,7 +701,7 @@ function interceptFetch() {
       }
     }
 
-    var mockMatch = hasResponseBodyMock(rule) ? rule.response.body : null;
+    var mockMatch = hasResponseBodyMock(rule) ? buildMockedResponseBody(rule, rule.response.body).body : null;
     if (hasResponseBodyMock(rule)) {
       var reqId = generateId();
       var startTime = Date.now();
@@ -735,13 +752,28 @@ function interceptFetch() {
           headers: buildResponseHeaders(rule, collectHeaders(response.headers))
         });
       }
-      var cloned = returnedResponse.clone();
-      cloned.text().then(function (text) {
+      return returnedResponse.clone().text().then(function (text) {
         var duration = Date.now() - startTime;
         var respHeaders = {};
         try {
           returnedResponse.headers.forEach(function (v, k) { respHeaders[k] = v; });
         } catch (e) {}
+
+        var parsedBody = tryParseJson(text);
+        var patchWarnings = [];
+        var finalResponse = returnedResponse;
+        if (rule && hasResponsePatches(rule) && parsedBody && typeof parsedBody === 'object') {
+          var builtFetch = buildMockedResponseBody(rule, parsedBody);
+          parsedBody = builtFetch.body;
+          patchWarnings = builtFetch.warnings || [];
+          try {
+            finalResponse = new Response(JSON.stringify(parsedBody), {
+              status: returnedResponse.status,
+              statusText: returnedResponse.statusText,
+              headers: buildResponseHeaders(rule, respHeaders)
+            });
+          } catch (eResp) {}
+        }
 
         addRequestRecord({
           id: reqId,
@@ -753,13 +785,16 @@ function interceptFetch() {
           requestBody: tryParseJson(reqBody),
           responseStatus: returnedResponse.status,
           responseHeaders: respHeaders,
-          responseBody: tryParseJson(text),
+          responseBody: parsedBody,
           duration: duration,
           aiAnalysis: null,
-          isMocked: false,
-          mockData: null,
-          debugRule: rule
+          isMocked: !!(rule && hasResponsePatches(rule)),
+          mockData: (rule && hasResponsePatches(rule)) ? parsedBody : null,
+          debugRule: rule,
+          patchWarnings: patchWarnings
         });
+        consumeOnceRuleByKey(rule && rule._key);
+        return finalResponse;
       }).catch(function () {
         var duration = Date.now() - startTime;
         addRequestRecord({
@@ -779,9 +814,9 @@ function interceptFetch() {
           mockData: null,
           debugRule: rule
         });
+        consumeOnceRuleByKey(rule && rule._key);
+        return returnedResponse;
       });
-      consumeOnceRuleByKey(rule && rule._key);
-      return returnedResponse;
     }).catch(function (err) {
       addRequestRecord({
         id: reqId,
