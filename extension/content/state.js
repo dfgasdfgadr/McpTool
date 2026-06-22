@@ -73,7 +73,9 @@ var DEFAULT_CONFIG = {
   mcpToken: '',
   mcpAutoSync: false,
   mcpToolNaming: 'full',
-  mcpExportPath: ''
+  mcpExportPath: '',
+  enableFlowContextListTool: true,
+  enableFlowContextDetailTool: true
 };
 
 var CONFIG_KEY = 'ai_req_analyzer_config';
@@ -135,13 +137,17 @@ var state = {
   mcpViewDataset: null,
   mcpListUi: {
     keyword: '',
+    viewMode: 'flowTree',
     groupMode: 'none',
     filterEnabled: 'all',
     riskLevels: {},
     toolbarCollapsed: false,
     siteFilter: 'all',
     selectedToolName: null,
-    inspectorOpen: false
+    selectedFlowId: null,
+    collapsedFlowIds: {},
+    inspectorOpen: false,
+    scrollToFlowId: null
   }
 };
 
@@ -215,6 +221,7 @@ function createFlow(name) {
   var id = 'flow_' + Date.now().toString(36) + '_' + Math.random().toString(36).substr(2, 6);
   var flow = {
     id: id,
+    kind: 'recorded',
     name: name || '未命名流程',
     hostname: location.hostname,
     startedAt: Date.now(),

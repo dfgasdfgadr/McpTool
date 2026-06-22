@@ -1053,6 +1053,22 @@ function findFlowRequestIdsForTool(flow, tool) {
   return matched;
 }
 
+function stripFlowTagFromDescription(tool) {
+  if (!tool) return;
+  var d = tool.description || '';
+  if (d.indexOf('[流程:') !== 0) return;
+  var end = d.indexOf('] ');
+  if (end >= 0) tool.description = d.substring(end + 2);
+  else tool.description = d.replace(/^\[流程:[^\]]*\]\s*/, '');
+}
+
+function applyFlowTagToToolDescription(tool, flowName) {
+  if (!tool || !flowName) return;
+  stripFlowTagFromDescription(tool);
+  var flowTag = '[流程: ' + flowName + '] ';
+  tool.description = flowTag + (tool.description || '');
+}
+
 function annotateFlowMetaOnTool(tool, flow) {
   if (!tool || !flow) return tool;
   if (!tool._meta) tool._meta = {};
@@ -1078,6 +1094,9 @@ function annotateFlowMetaOnTool(tool, flow) {
   };
   tool._meta.verifiedByFlow = true;
   tool._meta.aiVisible = true;
+  if (flow.name) {
+    applyFlowTagToToolDescription(tool, flow.name);
+  }
   tool._meta.usability = tool._meta.usability || {
     verified: true,
     tested: false,
@@ -1088,28 +1107,34 @@ function annotateFlowMetaOnTool(tool, flow) {
 }
 
 function generateMcpToolsFromFlow(flow) {
-  if (!flow) return { added: 0, skipped: 0 };
+  if (!flow) return { added: 0, skipped: 0, linked: 0 };
   var records = collectFlowVerifiedRecords(flow);
-  if (records.length === 0) return { added: 0, skipped: 0 };
+  if (records.length === 0) return { added: 0, skipped: 0, linked: 0 };
   var generator = typeof pickGeneratorForRequests === 'function' ? pickGeneratorForRequests() : generateMcpToolsFromRecords;
   var tools = generator(records);
   for (var i = 0; i < tools.length; i++) {
     annotateFlowMetaOnTool(tools[i], flow);
   }
-  var beforeNames = Object.keys(state.mcpTools || {});
+  var mcpMap = state.mcpTools || (state.mcpTools = {});
   var stats = mergeGeneratedMcpToolsIntoState(tools);
-  var afterNames = Object.keys(state.mcpTools || {});
   if (!flow.mcpToolNames) flow.mcpToolNames = [];
-  for (var j = 0; j < afterNames.length; j++) {
-    if (beforeNames.indexOf(afterNames[j]) === -1 && flow.mcpToolNames.indexOf(afterNames[j]) === -1) {
-      flow.mcpToolNames.push(afterNames[j]);
+  var linked = 0;
+  for (var j = 0; j < tools.length; j++) {
+    var t = tools[j];
+    var resolvedName = findExistingMcpToolNameByConflictKey(t, mcpMap) || (mcpMap[t.name] ? t.name : null);
+    if (!resolvedName || !mcpMap[resolvedName]) continue;
+    annotateFlowMetaOnTool(mcpMap[resolvedName], flow);
+    if (flow.mcpToolNames.indexOf(resolvedName) === -1) {
+      flow.mcpToolNames.push(resolvedName);
+      linked++;
     }
   }
-  if (stats.added > 0) {
+  if (tools.length > 0) {
     saveMcpTools();
     saveFlows();
     try { chrome.runtime.sendMessage({ type: 'MCP_SYNC_TOOLS' }); } catch (e) {}
   }
+  stats.linked = linked;
   return stats;
 }
 

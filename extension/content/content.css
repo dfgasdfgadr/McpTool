@@ -795,15 +795,18 @@
   position: absolute;
   inset: 0;
   border-radius: inherit;
-  z-index: 20;
+  z-index: 1000;
+  background: rgba(0, 0, 0, 0.72);
 }
 .ai-req-confirm-modal {
   width: min(400px, 100%);
-  background: var(--ai-surface-2);
-  border: 1px solid var(--ai-border-strong);
+  background: var(--ai-surface-2, #171c2a);
+  border: 1px solid var(--ai-border-strong, rgba(255, 255, 255, 0.16));
   border-radius: 14px;
   padding: 16px;
   box-shadow: 0 24px 64px rgba(0, 0, 0, 0.5);
+  position: relative;
+  z-index: 1;
 }
 .ai-req-confirm-danger {
   border-color: rgba(255, 107, 122, 0.35);
@@ -3265,9 +3268,92 @@
 }
 .ai-req-flow-mcp-result-modal {
   border-color: rgba(110, 168, 255, 0.26);
+  background: #171c2a;
+  color: #eef3ff;
+}
+.ai-req-flow-mcp-result-modal .ai-req-confirm-title {
+  color: #eef3ff;
+}
+.ai-req-flow-mcp-result-modal .ai-req-confirm-body {
+  color: #8b93a7;
+}
+.ai-req-flow-mcp-result-actions {
+  justify-content: center;
 }
 .ai-req-flow-mcp-result-actions .ai-req-btn-primary {
   min-width: 120px;
+}
+
+.ai-req-flow-toolset {
+  margin: 10px 12px 0;
+  padding: 10px 12px;
+  border: 1px solid rgba(110, 168, 255, 0.18);
+  border-radius: 8px;
+  background: rgba(110, 168, 255, 0.06);
+}
+.ai-req-flow-toolset-head {
+  margin-bottom: 6px;
+  color: #eef3ff;
+}
+.ai-req-flow-toolset-stats {
+  font-size: 12px;
+  color: #8b93a7;
+  margin-bottom: 8px;
+}
+.ai-req-flow-toolset-list {
+  margin: 0 0 10px;
+  padding-left: 18px;
+  font-size: 12px;
+  color: #c8d0e0;
+}
+.ai-req-flow-toolset-item.ai-req-flow-toolset-missing {
+  color: #ff8a80;
+}
+.ai-req-flow-toolset-item.ai-req-flow-toolset-disabled {
+  color: #ffb74d;
+}
+.ai-req-flow-toolset-empty {
+  font-size: 12px;
+  color: #8b93a7;
+  margin-bottom: 10px;
+}
+.ai-req-flow-toolset-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.ai-req-mcp-sys-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  line-height: 1.4;
+  color: #8ec5ff;
+  background: rgba(110, 168, 255, 0.16);
+  vertical-align: middle;
+}
+.ai-req-mcp-sys-enabled {
+  font-size: 11px;
+  color: #8b93a7;
+}
+.ai-req-flow-context-preview-modal {
+  max-width: min(720px, 92vw);
+  border-color: rgba(110, 168, 255, 0.26);
+  background: #171c2a;
+  color: #eef3ff;
+}
+.ai-req-flow-context-preview-body {
+  max-height: 50vh;
+  overflow: auto;
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.25);
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 @media (max-width: 520px) {
@@ -3282,4 +3368,90 @@
   .ai-req-settings-scroll {
     padding: 10px;
   }
+}
+
+.ai-req-mcp-flow-group-header {
+  display: grid;
+  grid-template-columns: 18px minmax(80px, 1.2fr) auto auto 1fr auto;
+  gap: 6px;
+  align-items: center;
+  padding: 8px 10px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--ai-text);
+  background: rgba(110, 168, 255, 0.1);
+  border-bottom: 1px solid var(--ai-border);
+  cursor: pointer;
+  user-select: none;
+}
+.ai-req-mcp-flow-group-header.ai-req-mcp-flow-group-no-host {
+  grid-template-columns: 18px minmax(80px, 1.4fr) auto auto 1fr auto;
+}
+.ai-req-mcp-flow-group-header.ai-req-mcp-flow-group-selected {
+  background: rgba(110, 168, 255, 0.2);
+  border-left: 3px solid var(--ai-accent);
+}
+.ai-req-mcp-flow-chevron {
+  font-size: 10px;
+  color: var(--ai-muted);
+  width: 14px;
+  text-align: center;
+}
+.ai-req-mcp-flow-group-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ai-req-mcp-flow-group-sub {
+  font-weight: 400;
+  color: var(--ai-muted);
+  font-size: 10px;
+}
+.ai-req-mcp-flow-group-count {
+  font-size: 10px;
+  color: var(--ai-muted);
+  font-weight: 600;
+}
+.ai-req-mcp-flow-kind-badge {
+  font-size: 9px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.ai-req-mcp-flow-kind-recorded {
+  background: rgba(70, 211, 154, 0.15);
+  color: var(--ai-success);
+}
+.ai-req-mcp-flow-kind-manual {
+  background: rgba(245, 184, 91, 0.15);
+  color: var(--ai-warning);
+}
+.ai-req-mcp-flow-group-actions {
+  display: flex;
+  gap: 4px;
+  justify-self: end;
+}
+.ai-req-mcp-flow-group-actions button {
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  padding: 2px 4px;
+  font-size: 12px;
+  opacity: 0.7;
+}
+.ai-req-mcp-flow-group-actions button:hover {
+  opacity: 1;
+}
+.ai-req-mcp-table-row.ai-req-mcp-flow-child {
+  padding-left: 24px;
+  background: rgba(0, 0, 0, 0.08);
+}
+.ai-req-mcp-view-mode {
+  min-width: 88px;
+}
+.ai-req-mcp-move-to-flow-select {
+  min-width: 140px;
+  max-width: 200px;
 }

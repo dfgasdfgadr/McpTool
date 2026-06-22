@@ -1,5 +1,7 @@
 'use strict';
 
+importScripts('background-flow-context.js');
+
 var MENU_IDS = {
   OPEN_PANEL: 'ai_req_analyzer_open_panel',
   OPEN_CONFIG: 'ai_req_analyzer_open_config',
@@ -43,6 +45,17 @@ function partitionMcpToolArguments(toolMeta, toolArguments) {
     rest[key] = args[key];
   }
   return { pathname: resolvedPath, restArgs: rest };
+}
+
+function normalizeMcpRequestBody(bodyData) {
+  if (bodyData == null) return bodyData;
+  if (Array.isArray(bodyData)) return bodyData;
+  if (typeof bodyData !== 'object') return bodyData;
+  var keys = Object.keys(bodyData);
+  if (keys.length === 1 && keys[0] === 'body' && Array.isArray(bodyData.body)) {
+    return bodyData.body;
+  }
+  return bodyData;
 }
 
 function installMenus() {
@@ -162,8 +175,9 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
   }
 
   if (message.type === 'MCP_SYNC_TOOLS') {
-    syncToolsToHelper();
-    sendResponse({ ok: true, synced: mcpState.helperConnected && mcpState.httpReady });
+    syncToolsToHelper(function (result) {
+      sendResponse(result);
+    });
     return true;
   }
 
@@ -215,18 +229,57 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
           excludeCurrentRemainCount++;
         }
       }
+      var flowCtxCfg = parseExtensionConfigFromItems(items);
+      appendFlowContextSystemTools(toolsOut, flowCtxCfg);
+      var flowsById = {};
+      var storageKeysMv = Object.keys(items || {});
+      var fki;
+      for (fki = 0; fki < storageKeysMv.length; fki++) {
+        var fkey = storageKeysMv[fki];
+        if (fkey.indexOf('ai_req_flows_') !== 0) continue;
+        var fobj = parseStoredTools(items[fkey]);
+        if (!fobj || typeof fobj !== 'object') continue;
+        var fk = Object.keys(fobj);
+        for (var ffi = 0; ffi < fk.length; ffi++) {
+          var frec = fobj[fk[ffi]];
+          if (frec && frec.id) flowsById[frec.id] = frec;
+        }
+      }
+      var sysKeys = [FLOW_CONTEXT_LIST_TOOL, FLOW_CONTEXT_DETAIL_TOOL];
+      for (var sk = 0; sk < sysKeys.length; sk++) {
+        if (toolsOut[sysKeys[sk]]) hostByToolOut[sysKeys[sk]] = '(system)';
+      }
+      var viewEnabledCount = countEnabledMcpTools(toolsOut);
       sendResponse({
         ok: true,
         siteFilter: siteFilterMv,
         tools: toolsOut,
         hostByTool: hostByToolOut,
+        flowsById: flowsById,
         hosts: pack.hosts,
         hostToolCounts: pack.hostToolCounts || {},
+        hostEnabledCounts: pack.hostEnabledCounts || {},
         mergedToolCount: mergedToolCount,
         mergedEnabledCount: mergedEnabledCount,
+        viewEnabledCount: viewEnabledCount,
+        helperToolCount: mcpState.toolCount || 0,
+        helperConnected: mcpState.helperConnected,
+        httpReady: mcpState.httpReady,
         excludeCurrentRemainCount: excludeCurrentRemainCount,
         currentTabHostname: tabHostnameMv
       });
+    });
+    return true;
+  }
+
+  if (message.type === 'MCP_GET_FLOW_CONTEXT') {
+    chrome.storage.local.get(null, function (items) {
+      var args = {
+        flowId: message.flowId || '',
+        flowName: message.flowName || ''
+      };
+      var result = executeFlowContextSystemTool(FLOW_CONTEXT_DETAIL_TOOL, args, items);
+      sendResponse(result);
     });
     return true;
   }
@@ -560,12 +613,23 @@ function parseStoredTools(toolsVal) {
   return null;
 }
 
+function countEnabledMcpTools(toolsObj) {
+  var n = 0;
+  var keys = Object.keys(toolsObj || {});
+  for (var i = 0; i < keys.length; i++) {
+    var t = toolsObj[keys[i]];
+    if (t && t.enabled !== false) n++;
+  }
+  return n;
+}
+
 /** 与 syncToolsToHelper 相同的合并顺序（storage key 遍历顺序后者覆盖同名工具） */
 function mergeAllMcpToolsFromStorage(items) {
   var allTools = {};
   var hostByTool = {};
   var hostsObj = {};
   var hostToolCounts = {};
+  var hostEnabledCounts = {};
   var storageKeys = Object.keys(items || {});
   var ki;
   for (ki = 0; ki < storageKeys.length; ki++) {
@@ -576,9 +640,11 @@ function mergeAllMcpToolsFromStorage(items) {
     var toolsObj = parseStoredTools(items[key]);
     if (!toolsObj || typeof toolsObj !== 'object') {
       hostToolCounts[hostname] = 0;
+      hostEnabledCounts[hostname] = 0;
       continue;
     }
     hostToolCounts[hostname] = Object.keys(toolsObj).length;
+    hostEnabledCounts[hostname] = countEnabledMcpTools(toolsObj);
     var tKeys = Object.keys(toolsObj);
     var ti;
     for (ti = 0; ti < tKeys.length; ti++) {
@@ -591,7 +657,8 @@ function mergeAllMcpToolsFromStorage(items) {
     merged: allTools,
     hostByTool: hostByTool,
     hosts: Object.keys(hostsObj).sort(),
-    hostToolCounts: hostToolCounts
+    hostToolCounts: hostToolCounts,
+    hostEnabledCounts: hostEnabledCounts
   };
 }
 
@@ -938,11 +1005,12 @@ function buildMcpProxyPayload(callId, toolName, toolMeta, toolArguments) {
       bodyData[argKey] = parted.restArgs[argKey];
     }
   }
+  var normalizedBody = normalizeMcpRequestBody(bodyData);
   return {
     pathname: pathname,
     method: method,
     execHeaders: execHeaders,
-    bodyData: bodyData,
+    bodyData: normalizedBody,
     queryString: queryString,
     payload: {
       callId: callId,
@@ -950,7 +1018,7 @@ function buildMcpProxyPayload(callId, toolName, toolMeta, toolArguments) {
       url: '',
       method: method,
       headers: execHeaders,
-      body: bodyData,
+      body: normalizedBody,
       timeout: 30000
     }
   };
@@ -968,10 +1036,16 @@ function fallbackFetch(toolMeta, url, method, headers, body) {
     method: method || 'GET',
     headers: fetchHeaders
   };
-  if (method && method.toUpperCase() !== 'GET' && body && Object.keys(body).length > 0) {
-    fetchOpts.body = JSON.stringify(body);
-    if (!fetchHeaders['Content-Type']) {
-      fetchHeaders['Content-Type'] = 'application/json';
+  if (method && method.toUpperCase() !== 'GET' && body != null) {
+    var normalizedBody = normalizeMcpRequestBody(body);
+    var hasBody = Array.isArray(normalizedBody)
+      ? normalizedBody.length > 0
+      : (typeof normalizedBody === 'object' ? Object.keys(normalizedBody).length > 0 : !!normalizedBody);
+    if (hasBody) {
+      fetchOpts.body = typeof normalizedBody === 'string' ? normalizedBody : JSON.stringify(normalizedBody);
+      if (!fetchHeaders['Content-Type']) {
+        fetchHeaders['Content-Type'] = 'application/json';
+      }
     }
   }
   return fetch(url, fetchOpts).then(function (res) {
@@ -1000,6 +1074,25 @@ function fallbackFetch(toolMeta, url, method, headers, body) {
 
 function handleMcpToolCall(callId, toolName, toolArguments) {
   var startTime = Date.now();
+  if (isFlowContextSystemTool(toolName)) {
+    chrome.storage.local.get(null, function (items) {
+      var sysResult = executeFlowContextSystemTool(toolName, toolArguments, items);
+      sysResult.callId = callId;
+      addMcpCallLog({
+        timestamp: Date.now(),
+        toolName: toolName,
+        argsSummary: JSON.stringify(toolArguments || {}).substring(0, 200),
+        status: sysResult.ok ? 200 : 0,
+        duration: Date.now() - startTime,
+        proxyMode: 'flow_context',
+        error: sysResult.ok ? null : (sysResult.message || sysResult.errorCode || 'flow context error')
+      });
+      if (mcpState.helperPort && mcpState.helperConnected) {
+        mcpState.helperPort.postMessage({ type: 'CALL_RESULT', callId: callId, result: sysResult });
+      }
+    });
+    return;
+  }
   chrome.storage.local.get(null, function (items) {
     var toolDef = null;
     var toolMeta = null;
@@ -1082,15 +1175,47 @@ function handleMcpToolCall(callId, toolName, toolArguments) {
   });
 }
 
-function syncToolsToHelper() {
-  if (!mcpState.helperPort) return;
+function syncToolsToHelper(callback) {
+  if (!mcpState.helperPort || !mcpState.helperConnected) {
+    if (typeof callback === 'function') {
+      callback({
+        ok: false,
+        synced: false,
+        error: 'MCP helper 未连接',
+        toolCount: mcpState.toolCount || 0
+      });
+    }
+    return;
+  }
   chrome.storage.local.get(null, function (items) {
     var pack = mergeAllMcpToolsFromStorage(items);
     var allTools = pack.merged;
+    var flowCtxCfg = parseExtensionConfigFromItems(items);
+    appendFlowContextSystemTools(allTools, flowCtxCfg);
+    var enabledCount = countEnabledMcpTools(allTools);
     try {
       mcpState.helperPort.postMessage({ type: 'SYNC_TOOLS', tools: allTools });
-      console.log('[AI_REQ_ANALYZER] synced tools to helper:', Object.keys(allTools).length);
-    } catch (e) {}
+      mcpState.tools = allTools;
+      mcpState.toolCount = enabledCount;
+      console.log('[AI_REQ_ANALYZER] synced tools to helper:', Object.keys(allTools).length, 'enabled:', enabledCount);
+      if (typeof callback === 'function') {
+        callback({
+          ok: true,
+          synced: true,
+          toolCount: enabledCount,
+          totalToolCount: Object.keys(allTools).length
+        });
+      }
+    } catch (e) {
+      if (typeof callback === 'function') {
+        callback({
+          ok: false,
+          synced: false,
+          error: e && e.message ? e.message : String(e),
+          toolCount: mcpState.toolCount || 0
+        });
+      }
+    }
   });
 }
 

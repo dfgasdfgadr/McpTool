@@ -5,17 +5,24 @@ function ensureMcpListUi() {
   if (!state.mcpListUi) {
     state.mcpListUi = {
       keyword: '',
+      viewMode: 'flowTree',
       groupMode: 'none',
       filterEnabled: 'all',
       riskLevels: {},
       toolbarCollapsed: false,
       siteFilter: 'all',
       selectedToolName: null,
-      inspectorOpen: false
+      selectedFlowId: null,
+      collapsedFlowIds: {},
+      inspectorOpen: false,
+      scrollToFlowId: null
     };
   } else {
     if (!state.mcpListUi.siteFilter) state.mcpListUi.siteFilter = 'all';
+    if (!state.mcpListUi.viewMode) state.mcpListUi.viewMode = 'flowTree';
+    if (!state.mcpListUi.collapsedFlowIds) state.mcpListUi.collapsedFlowIds = {};
     if (typeof state.mcpListUi.selectedToolName === 'undefined') state.mcpListUi.selectedToolName = null;
+    if (typeof state.mcpListUi.selectedFlowId === 'undefined') state.mcpListUi.selectedFlowId = null;
     if (typeof state.mcpListUi.inspectorOpen !== 'boolean') state.mcpListUi.inspectorOpen = false;
   }
 }
@@ -27,7 +34,7 @@ function syncMcpInspectorVisibility(mcpContent) {
   var inspector = mcpContent.querySelector('.ai-req-mcp-inspector');
   if (!split || !inspector) return;
   var ui = state.mcpListUi;
-  var open = !!ui.inspectorOpen && !!ui.selectedToolName;
+  var open = !!ui.inspectorOpen && (!!ui.selectedToolName || !!ui.selectedFlowId);
   var isWide = state.ui && state.ui.layoutMode === 'wide';
   split.setAttribute('data-inspector-open', open ? '1' : '0');
   inspector.style.display = open ? 'flex' : 'none';
@@ -52,6 +59,22 @@ function buildMcpToolInspectorHTML(toolName) {
     return '<div class="ai-req-inspector-empty">工具不存在或已被删除</div>';
   }
   var meta = tool._meta || {};
+  if (isFlowContextSystemToolName(toolName) || meta.flowContextSystem) {
+    var sysHtml = '';
+    sysHtml += '<div class="ai-req-mcp-inspector-section">';
+    sysHtml += '<div class="ai-req-detail-label">类型</div>';
+    sysHtml += '<div class="ai-req-detail-value">系统工具 · 流程上下文查询</div>';
+    sysHtml += '</div>';
+    sysHtml += '<div class="ai-req-mcp-inspector-section">';
+    sysHtml += '<div class="ai-req-detail-label">描述</div>';
+    sysHtml += '<div class="ai-req-detail-value">' + escapeHtml(tool.description || '（无）') + '</div>';
+    sysHtml += '</div>';
+    sysHtml += '<div class="ai-req-mcp-inspector-section">';
+    sysHtml += '<div class="ai-req-detail-label">说明</div>';
+    sysHtml += '<div class="ai-req-detail-value">系统工具由扩展固定提供，不可删除或禁用。可在设置页控制是否暴露给 Cursor。</div>';
+    sysHtml += '</div>';
+    return sysHtml;
+  }
   var host = resolveMcpToolHostFromView(toolName);
   var riskLevel = (tool._meta && tool._meta.riskLevel) || 'low';
   var enabled = tool.enabled !== false;
@@ -113,9 +136,53 @@ function buildMcpToolInspectorHTML(toolName) {
   }
   html += '</div>';
   html += '<div class="ai-req-mcp-inspector-actions">';
+  if (flowMeta) {
+    html += '<button type="button" class="ai-req-btn ai-req-btn-secondary ai-req-mcp-tool-unassign-btn" data-tool-name="' + escapeHtml(toolName) + '">移出流程</button>';
+  }
   html += '<button type="button" class="ai-req-btn ai-req-btn-primary ai-req-mcp-tool-edit-btn" data-tool-name="' + escapeHtml(toolName) + '">编辑</button>';
   html += '<button type="button" class="ai-req-btn ai-req-btn-secondary ai-req-mcp-tool-test-btn" data-tool-name="' + escapeHtml(toolName) + '">测试</button>';
   html += '<button type="button" class="ai-req-btn ai-req-btn-danger ai-req-mcp-tool-delete-btn" data-tool-name="' + escapeHtml(toolName) + '">删除</button>';
+  html += '</div>';
+  return html;
+}
+
+function buildMcpFlowInspectorHTML(flowId) {
+  var flow = getFlowById(flowId);
+  if (!flow) return '<div class="ai-req-inspector-empty">流程不存在</div>';
+  var kind = inferFlowKind(flow);
+  var kindLabel = kind === 'manual' ? '手动' : '录制';
+  var toolsMap = getMcpListToolsMap();
+  var linked = 0;
+  var mi;
+  for (mi = 0; mi < (flow.mcpToolNames || []).length; mi++) {
+    if (toolsMap[flow.mcpToolNames[mi]]) linked++;
+  }
+  var html = '';
+  html += '<div class="ai-req-mcp-inspector-section">';
+  html += '<div class="ai-req-detail-label">类型</div>';
+  html += '<div class="ai-req-detail-value">' + escapeHtml(kindLabel) + '流程</div>';
+  html += '</div>';
+  html += '<div class="ai-req-mcp-inspector-section">';
+  html += '<div class="ai-req-detail-label">站点</div>';
+  html += '<div class="ai-req-detail-value">' + escapeHtml(flow.hostname || '-') + '</div>';
+  html += '</div>';
+  html += '<div class="ai-req-mcp-inspector-section">';
+  html += '<div class="ai-req-detail-label">工具</div>';
+  html += '<div class="ai-req-detail-value">已关联 ' + (flow.mcpToolNames || []).length + ' · 可见 ' + linked;
+  if ((flow.mcpToolNames || []).length > linked) {
+    html += ' · 缺失 ' + ((flow.mcpToolNames || []).length - linked);
+  }
+  html += '</div></div>';
+  if (kind === 'manual') {
+    html += '<div class="ai-req-mcp-inspector-section"><div class="ai-req-detail-value">手动分组，无录制步骤。</div></div>';
+  } else {
+    html += '<div class="ai-req-mcp-inspector-section"><div class="ai-req-detail-value">步骤 ' + ((flow.steps || []).length) + ' · 已验证 ' + ((flow.verifiedRequestIds || []).length) + '</div></div>';
+  }
+  html += '<div class="ai-req-mcp-inspector-actions">';
+  html += '<button type="button" class="ai-req-btn ai-req-btn-secondary ai-req-mcp-flow-open-flow-btn" data-flow-id="' + escapeHtml(flowId) + '">在 FLOW 页打开</button>';
+  if ((flow.mcpToolNames || []).length > linked) {
+    html += '<button type="button" class="ai-req-btn ai-req-btn-secondary ai-req-mcp-flow-prune-btn" data-flow-id="' + escapeHtml(flowId) + '">清理缺失引用</button>';
+  }
   html += '</div>';
   return html;
 }
@@ -125,9 +192,18 @@ function renderMcpToolInspector(mcpContent, toolName) {
   var body = mcpContent.querySelector('.ai-req-mcp-inspector-body');
   var titleEl = mcpContent.querySelector('.ai-req-mcp-inspector-title');
   if (!body) return;
+  ensureMcpListUi();
+  if (!toolName && state.mcpListUi.selectedFlowId) {
+    if (titleEl) {
+      var selFlow = getFlowById(state.mcpListUi.selectedFlowId);
+      titleEl.textContent = selFlow ? (selFlow.name || selFlow.id) : '流程详情';
+    }
+    body.innerHTML = buildMcpFlowInspectorHTML(state.mcpListUi.selectedFlowId);
+    return;
+  }
   if (!toolName) {
     if (titleEl) titleEl.textContent = '工具详情';
-    body.innerHTML = '<div class="ai-req-inspector-empty">选择一条工具查看详情</div>';
+    body.innerHTML = '<div class="ai-req-inspector-empty">选择一条工具或流程查看详情</div>';
     return;
   }
   if (titleEl) {
@@ -179,8 +255,17 @@ function mcpToolMatchesKeyword(tool, name, kwLower) {
   return hay.indexOf(kwLower) !== -1;
 }
 
+function isFlowContextSystemToolName(name) {
+  return name === 'list_recorded_flows' || name === 'get_recorded_flow_context';
+}
+
 function getMcpToolGroupKey(name, tool, groupMode) {
+  if (isFlowContextSystemToolName(name)) return '系统工具';
   var meta = tool._meta || {};
+  if (groupMode === 'flow') {
+    var fn = meta.flow && meta.flow.flowName;
+    return fn ? fn : '其他';
+  }
   if (groupMode === 'method') return (meta.method || 'GET').toUpperCase();
   if (groupMode === 'risk') return String((meta.riskLevel || 'low')).toLowerCase();
   if (groupMode === 'pathPrefix') {
@@ -211,16 +296,124 @@ function getFilteredSortedMcpToolNames() {
   return pass;
 }
 
-function buildMcpToolListInnerHTML() {
+function buildMcpToolRowHTML(name, tool, opts) {
+  opts = opts || {};
+  var hostByTool = opts.hostByTool || {};
+  var showHostCol = opts.showHostCol !== false;
+  var selectedName = opts.selectedToolName;
+  var isChild = !!opts.isChild;
+  var riskLevel = (tool._meta && tool._meta.riskLevel) || 'low';
+  var enabled = tool.enabled !== false;
+  var picked = state.selectedMcpToolNames[name] ? true : false;
+  var meta = tool._meta || {};
+  var isSystemTool = isFlowContextSystemToolName(name) || !!meta.flowContextSystem;
+  var isSelected = selectedName === name;
+  var html = '';
+  html += '<div class="ai-req-mcp-table-row' + (isSelected ? ' ai-req-mcp-row-selected' : '') + (showHostCol ? '' : ' ai-req-mcp-row-no-host') + (isChild ? ' ai-req-mcp-flow-child' : '') + '" data-tool-name="' + escapeHtml(name) + '">';
+  if (isSystemTool) {
+    html += '<span class="ai-req-mcp-row-cb ai-req-mcp-row-cb-empty"></span>';
+  } else {
+    html += '<label class="ai-req-mcp-row-cb"><input type="checkbox" class="ai-req-mcp-tool-pick" data-tool-name="' + escapeHtml(name) + '"' + (picked ? ' checked' : '') + '></label>';
+  }
+  html += '<span class="ai-req-mcp-col-name" title="' + escapeHtml(name) + '">' + escapeHtml(name);
+  if (isSystemTool) html += ' <span class="ai-req-mcp-sys-badge">系统</span>';
+  html += '</span>';
+  if (showHostCol) {
+    html += '<span class="ai-req-mcp-col-host" title="来源站点">' + escapeHtml(hostByTool[name] || '-') + '</span>';
+  }
+  html += '<span class="ai-req-mcp-col-method">' + escapeHtml(isSystemTool ? 'SYS' : (meta.method || 'GET').toUpperCase()) + '</span>';
+  html += '<span class="ai-req-mcp-col-path" title="' + escapeHtml(meta.pathname || '') + '">' + escapeHtml(isSystemTool ? 'flow context' : (meta.pathname || '-')) + '</span>';
+  html += '<span class="ai-req-mcp-risk ai-req-mcp-risk-' + escapeHtml(riskLevel) + ' ai-req-mcp-col-risk">' + escapeHtml(isSystemTool ? '-' : riskLevel) + '</span>';
+  if (isSystemTool) {
+    html += '<span class="ai-req-mcp-col-enabled ai-req-mcp-sys-enabled">固定</span>';
+  } else {
+    html += '<label class="ai-req-mcp-toggle ai-req-mcp-col-enabled"><input type="checkbox" class="ai-req-mcp-tool-enabled" data-tool-name="' + escapeHtml(name) + '"' + (enabled ? ' checked' : '') + '></label>';
+  }
+  html += '</div>';
+  return html;
+}
+
+function buildMcpFlowTreeHTML() {
+  ensureMcpListUi();
+  var ui = state.mcpListUi;
+  var toolsMap = getMcpListToolsMap();
+  var hostByTool = (state.mcpViewDataset && state.mcpViewDataset.hostByTool) || {};
+  var sfUi = ui.siteFilter || 'all';
+  var showHostCol = sfUi === 'all' || sfUi === MCP_SITE_FILTER_EXCLUDE_CURRENT;
+  var filteredSet = buildFilteredToolNameSet(toolsMap, ui);
+  var groups = buildFlowTreeGroups(toolsMap, getMergedFlowsMap(), {
+    filteredToolSet: filteredSet,
+    hostByTool: hostByTool
+  });
+  var html = '';
+  if (Object.keys(toolsMap || {}).length === 0) {
+    return '<div class="ai-req-mcp-empty">暂无 MCP 工具（当前筛选范围），可切换「全部站点」或换站点查看</div>';
+  }
+  var hasVisible = false;
+  var gi;
+  for (gi = 0; gi < groups.length; gi++) {
+    if (groups[gi].tools.length > 0) hasVisible = true;
+    else if (groups[gi].kind !== 'system' && groups[gi].kind !== 'other' && groups[gi].flow) hasVisible = true;
+  }
+  if (!hasVisible) {
+    return '<div class="ai-req-mcp-empty">无匹配项，调整筛选或关键词</div>';
+  }
+  var scrollId = ui.scrollToFlowId;
+  if (scrollId) {
+    delete ui.collapsedFlowIds[scrollId];
+    ui.scrollToFlowId = null;
+  }
+  for (gi = 0; gi < groups.length; gi++) {
+    var group = groups[gi];
+    var isSystem = group.kind === 'system';
+    var isOther = group.kind === 'other';
+    var isNamedFlow = group.flowId && !isSystem && !isOther;
+    var collapsed = !!ui.collapsedFlowIds[group.key];
+    if (group.tools.length === 0 && !isNamedFlow) continue;
+    if (isNamedFlow && group.tools.length === 0 && !group.flow) continue;
+    var chevron = collapsed ? '\u25B6' : '\u25BC';
+    var kindBadge = '';
+    if (isNamedFlow) {
+      kindBadge = '<span class="ai-req-mcp-flow-kind-badge ai-req-mcp-flow-kind-' + escapeHtml(group.kind) + '">' + (group.kind === 'manual' ? '手动' : '录制') + '</span>';
+    }
+    var countLabel = group.tools.length;
+    var selectedFlow = ui.selectedFlowId === group.flowId;
+    html += '<div class="ai-req-mcp-flow-group-header' + (selectedFlow ? ' ai-req-mcp-flow-group-selected' : '') + (showHostCol ? '' : ' ai-req-mcp-flow-group-no-host') + '" data-flow-group-key="' + escapeHtml(group.key) + '"' + (group.flowId ? ' data-flow-id="' + escapeHtml(group.flowId) + '"' : '') + '>';
+    html += '<span class="ai-req-mcp-flow-chevron">' + chevron + '</span>';
+    html += '<span class="ai-req-mcp-flow-group-title">' + escapeHtml(group.title);
+    if (group.subtitle) html += ' <span class="ai-req-mcp-flow-group-sub">(' + escapeHtml(group.subtitle) + ')</span>';
+    html += '</span>';
+    html += '<span class="ai-req-mcp-flow-group-count">(' + countLabel + ')</span>';
+    html += kindBadge;
+    if (isNamedFlow) {
+      html += '<span class="ai-req-mcp-flow-group-actions">';
+      html += '<button type="button" class="ai-req-mcp-flow-rename-btn" data-flow-id="' + escapeHtml(group.flowId) + '" title="重命名">\u270E</button>';
+      html += '<button type="button" class="ai-req-mcp-flow-delete-btn" data-flow-id="' + escapeHtml(group.flowId) + '" title="删除">\uD83D\uDDD1</button>';
+      html += '</span>';
+    }
+    html += '</div>';
+    if (!collapsed) {
+      var ti;
+      for (ti = 0; ti < group.tools.length; ti++) {
+        var tname = group.tools[ti];
+        var ttool = toolsMap[tname];
+        if (!ttool) continue;
+        html += buildMcpToolRowHTML(tname, ttool, {
+          hostByTool: hostByTool,
+          showHostCol: showHostCol,
+          selectedToolName: ui.selectedToolName,
+          isChild: true
+        });
+      }
+    }
+  }
+  return html;
+}
+
+function buildMcpFlatToolListHTML() {
   ensureMcpListUi();
   var ui = state.mcpListUi;
   var html = '';
-  if (!state.mcpViewDataset) {
-    return '<div class="ai-req-mcp-empty">正在加载工具列表...</div>';
-  }
-  if (!state.mcpViewDataset.ok) {
-    return '<div class="ai-req-mcp-empty">无法加载工具数据，请关闭再打开 MCP 面板重试</div>';
-  }
   var toolsMap = getMcpListToolsMap();
   var hostByTool = (state.mcpViewDataset && state.mcpViewDataset.hostByTool) || {};
   var sfUi = ui.siteFilter || 'all';
@@ -228,21 +421,16 @@ function buildMcpToolListInnerHTML() {
   var toolNames = getFilteredSortedMcpToolNames();
   var gm2 = ui.groupMode || 'none';
   var lastGk = '\u0000';
-  var selectedName = ui.selectedToolName;
   if (Object.keys(toolsMap || {}).length === 0) {
-    html += '<div class="ai-req-mcp-empty">暂无 MCP 工具（当前筛选范围），可切换「全部站点」或换站点查看</div>';
-  } else if (toolNames.length === 0) {
-    html += '<div class="ai-req-mcp-empty">无匹配项，调整筛选或关键词</div>';
+    return '<div class="ai-req-mcp-empty">暂无 MCP 工具（当前筛选范围），可切换「全部站点」或换站点查看</div>';
+  }
+  if (toolNames.length === 0) {
+    return '<div class="ai-req-mcp-empty">无匹配项，调整筛选或关键词</div>';
   }
   var ti;
   for (ti = 0; ti < toolNames.length; ti++) {
     var name = toolNames[ti];
     var tool = toolsMap[name];
-    var riskLevel = (tool._meta && tool._meta.riskLevel) || 'low';
-    var enabled = tool.enabled !== false;
-    var picked = state.selectedMcpToolNames[name] ? true : false;
-    var meta = tool._meta || {};
-    var isSelected = selectedName === name;
     if (gm2 !== 'none') {
       var gk = getMcpToolGroupKey(name, tool, gm2);
       if (gk !== lastGk) {
@@ -250,19 +438,28 @@ function buildMcpToolListInnerHTML() {
         html += '<div class="ai-req-mcp-group-header"><span class="ai-req-mcp-group-title">' + escapeHtml(gk) + '</span></div>';
       }
     }
-    html += '<div class="ai-req-mcp-table-row' + (isSelected ? ' ai-req-mcp-row-selected' : '') + (showHostCol ? '' : ' ai-req-mcp-row-no-host') + '" data-tool-name="' + escapeHtml(name) + '">';
-    html += '<label class="ai-req-mcp-row-cb"><input type="checkbox" class="ai-req-mcp-tool-pick" data-tool-name="' + escapeHtml(name) + '"' + (picked ? ' checked' : '') + '></label>';
-    html += '<span class="ai-req-mcp-col-name" title="' + escapeHtml(name) + '">' + escapeHtml(name) + '</span>';
-    if (showHostCol) {
-      html += '<span class="ai-req-mcp-col-host" title="来源站点">' + escapeHtml(hostByTool[name] || '-') + '</span>';
-    }
-    html += '<span class="ai-req-mcp-col-method">' + escapeHtml((meta.method || 'GET').toUpperCase()) + '</span>';
-    html += '<span class="ai-req-mcp-col-path" title="' + escapeHtml(meta.pathname || '') + '">' + escapeHtml(meta.pathname || '-') + '</span>';
-    html += '<span class="ai-req-mcp-risk ai-req-mcp-risk-' + escapeHtml(riskLevel) + ' ai-req-mcp-col-risk">' + escapeHtml(riskLevel) + '</span>';
-    html += '<label class="ai-req-mcp-toggle ai-req-mcp-col-enabled"><input type="checkbox" class="ai-req-mcp-tool-enabled" data-tool-name="' + escapeHtml(name) + '"' + (enabled ? ' checked' : '') + '></label>';
-    html += '</div>';
+    html += buildMcpToolRowHTML(name, tool, {
+      hostByTool: hostByTool,
+      showHostCol: showHostCol,
+      selectedToolName: ui.selectedToolName,
+      isChild: false
+    });
   }
   return html;
+}
+
+function buildMcpToolListInnerHTML() {
+  ensureMcpListUi();
+  if (!state.mcpViewDataset) {
+    return '<div class="ai-req-mcp-empty">正在加载工具列表...</div>';
+  }
+  if (!state.mcpViewDataset.ok) {
+    return '<div class="ai-req-mcp-empty">无法加载工具数据，请关闭再打开 MCP 面板重试</div>';
+  }
+  if ((state.mcpListUi.viewMode || 'flowTree') === 'flowTree') {
+    return buildMcpFlowTreeHTML();
+  }
+  return buildMcpFlatToolListHTML();
 }
 
 function refreshMcpToolListViewLocal(mcpContent) {
@@ -281,16 +478,48 @@ function refreshMcpToolListViewLocal(mcpContent) {
   }
   renderMcpToolInspector(
     mcpContent,
-    state.mcpListUi.inspectorOpen ? state.mcpListUi.selectedToolName : null
+    state.mcpListUi.inspectorOpen
+      ? (state.mcpListUi.selectedToolName || null)
+      : null
   );
   syncMcpInspectorVisibility(mcpContent);
   updateMcpSelectionStrip(mcpContent);
+  refreshMcpMoveToFlowSelect(mcpContent);
+  syncMcpViewModeToolbar(mcpContent);
   var tableHead = mcpContent.querySelector('.ai-req-mcp-table-head');
   if (tableHead) {
     var sfHead = state.mcpListUi.siteFilter || 'all';
     var showHostHead = sfHead === 'all' || sfHead === MCP_SITE_FILTER_EXCLUDE_CURRENT;
     tableHead.classList.toggle('ai-req-mcp-table-head-no-host', !showHostHead);
-    tableHead.style.display = toolNamesAfter.length > 0 ? 'grid' : 'none';
+    var isFlowTree = (state.mcpListUi.viewMode || 'flowTree') === 'flowTree';
+    var hasRows = isFlowTree
+      ? Object.keys(getMcpListToolsMap() || {}).length > 0
+      : toolNamesAfter.length > 0;
+    tableHead.style.display = hasRows ? 'grid' : 'none';
+  }
+}
+
+function refreshMcpMoveToFlowSelect(mcpContent) {
+  if (!mcpContent) return;
+  var sel = mcpContent.querySelector('.ai-req-mcp-move-to-flow-select');
+  if (!sel) return;
+  var flows = listAssignableFlows();
+  var html = '<option value="">移动到流程...</option>';
+  var i;
+  for (i = 0; i < flows.length; i++) {
+    html += '<option value="' + escapeHtml(flows[i].id) + '">' + escapeHtml(flows[i].name) + '</option>';
+  }
+  sel.innerHTML = html;
+}
+
+function syncMcpViewModeToolbar(mcpContent) {
+  if (!mcpContent) return;
+  var isFlowTree = (state.mcpListUi.viewMode || 'flowTree') === 'flowTree';
+  var grpWrap = mcpContent.querySelector('.ai-req-mcp-group-select-wrap');
+  if (grpWrap) grpWrap.style.display = isFlowTree ? 'none' : '';
+  var viewSel = mcpContent.querySelector('.ai-req-mcp-view-mode');
+  if (viewSel && viewSel.value !== (state.mcpListUi.viewMode || 'flowTree')) {
+    viewSel.value = state.mcpListUi.viewMode || 'flowTree';
   }
 }
 
@@ -302,6 +531,7 @@ function patchMcpToolListSection(mcpContent) {
   ensureMcpListUi();
   var sfReq = state.mcpListUi.siteFilter || 'all';
 
+  function loadToolsView() {
   chrome.runtime.sendMessage(
     {
       type: 'MCP_GET_TOOLS_VIEW',
@@ -314,6 +544,18 @@ function patchMcpToolListSection(mcpContent) {
       state.mcpViewDataset = { ok: false };
     } else {
       state.mcpViewDataset = resp && resp.ok ? resp : { ok: false };
+    }
+
+    if (state.mcpViewDataset && state.mcpViewDataset.flowsById) {
+      ensureFlowState();
+      var fbKeys = Object.keys(state.mcpViewDataset.flowsById);
+      var fbi;
+      for (fbi = 0; fbi < fbKeys.length; fbi++) {
+        var frec = state.mcpViewDataset.flowsById[fbKeys[fbi]];
+        if (frec && (!frec.hostname || frec.hostname === location.hostname)) {
+          state.flows[frec.id] = frec;
+        }
+      }
     }
 
     var siteSel = mcpContent.querySelector('.ai-req-mcp-site-filter');
@@ -335,13 +577,20 @@ function patchMcpToolListSection(mcpContent) {
       var exRemain =
         typeof ds.excludeCurrentRemainCount === 'number' ? ds.excludeCurrentRemainCount : mergedCnt;
       var htc = ds.hostToolCounts || {};
+      var hec = ds.hostEnabledCounts || {};
       var tabHost = typeof location !== 'undefined' ? location.hostname : '';
+      var mergedEnabledCnt = typeof ds.mergedEnabledCount === 'number' ? ds.mergedEnabledCount : 0;
+      var helperCnt = typeof ds.helperToolCount === 'number' ? ds.helperToolCount : 0;
       var opts =
         '<option value="all"' +
         (curSf === 'all' ? ' selected' : '') +
         '>\u5168\u90E8\u7AD9\u70B9\uFF08' +
         mergedCnt +
-        '\uFF09\u00B7Cursor\u5408\u5E76</option>';
+        '\uFF0F\u542F\u7528 ' +
+        mergedEnabledCnt +
+        '\uFF09\u00B7\u540C\u6B65\u5230 Cursor ' +
+        helperCnt +
+        '</option>';
       opts +=
         '<option value="' +
         MCP_SITE_FILTER_EXCLUDE_CURRENT +
@@ -356,6 +605,7 @@ function patchMcpToolListSection(mcpContent) {
       for (hi = 0; hi < hosts.length; hi++) {
         var h = hosts[hi];
         var hn = htc[h] != null ? htc[h] : 0;
+        var hen = hec[h] != null ? hec[h] : 0;
         opts +=
           '<option value="' +
           escapeHtml(h) +
@@ -365,6 +615,8 @@ function patchMcpToolListSection(mcpContent) {
           escapeHtml(h) +
           ' (' +
           hn +
+          '/启用 ' +
+          hen +
           ')</option>';
       }
       siteSel.innerHTML = opts;
@@ -386,16 +638,24 @@ function patchMcpToolListSection(mcpContent) {
       var ta = Object.keys(getMcpListToolsMap() || {}).length;
       var line = '\u663E\u793A ' + fv + ' / \u5171 ' + ta;
       if (ds && ds.ok && typeof ds.mergedToolCount === 'number') {
+        var helperLine = typeof ds.helperToolCount === 'number' ? ds.helperToolCount : ds.mergedEnabledCount;
         line +=
           ' \u00B7 \u5168\u5E93\u5408\u5E76 ' +
           ds.mergedToolCount +
-          ' \u00B7 Cursor\u5DF2\u542F\u7528 ' +
-          ds.mergedEnabledCount;
+          ' \u00B7 storage\u542F\u7528 ' +
+          ds.mergedEnabledCount +
+          ' \u00B7 helper\u5B9E\u9645 ' +
+          helperLine;
       }
       miniBar.textContent = line;
     }
 
     bindMcpToolListRowEvents(mcpContent);
+  });
+  }
+
+  chrome.runtime.sendMessage({ type: 'MCP_SYNC_TOOLS' }, function () {
+    loadToolsView();
   });
 }
 
@@ -426,11 +686,90 @@ function bindMcpToolListRowEvents(mcpContent) {
   });
 
   mcpContent.addEventListener('click', function (ev) {
+    var flowHdr = ev.target && ev.target.closest ? ev.target.closest('.ai-req-mcp-flow-group-header') : null;
+    if (flowHdr && !ev.target.closest('.ai-req-mcp-flow-rename-btn') && !ev.target.closest('.ai-req-mcp-flow-delete-btn')) {
+      ensureMcpListUi();
+      var gkey = flowHdr.getAttribute('data-flow-group-key');
+      var fid = flowHdr.getAttribute('data-flow-id');
+      if (gkey) {
+        if (state.mcpListUi.collapsedFlowIds[gkey]) delete state.mcpListUi.collapsedFlowIds[gkey];
+        else state.mcpListUi.collapsedFlowIds[gkey] = true;
+      }
+      if (fid) {
+        state.mcpListUi.selectedFlowId = fid;
+        state.mcpListUi.selectedToolName = null;
+        state.mcpListUi.inspectorOpen = true;
+      }
+      refreshMcpToolListViewLocal(mcpContent);
+      return;
+    }
+
+    var renameBtn = ev.target && ev.target.closest ? ev.target.closest('.ai-req-mcp-flow-rename-btn') : null;
+    if (renameBtn) {
+      ev.stopPropagation();
+      var rid = renameBtn.getAttribute('data-flow-id');
+      var rflow = getFlowById(rid);
+      if (!rflow) return;
+      var newName = prompt('重命名流程', rflow.name || '');
+      if (newName === null || !String(newName).trim()) return;
+      renameFlow(rid, String(newName).trim());
+      refreshMcpToolListViewLocal(mcpContent);
+      showToast('已重命名流程', 2000, 'success');
+      return;
+    }
+
+    var deleteFlowBtn = ev.target && ev.target.closest ? ev.target.closest('.ai-req-mcp-flow-delete-btn') : null;
+    if (deleteFlowBtn) {
+      ev.stopPropagation();
+      var did = deleteFlowBtn.getAttribute('data-flow-id');
+      var dflow = getFlowById(did);
+      if (!dflow) return;
+      var msg = inferFlowKind(dflow) === 'recorded'
+        ? '删除流程「' + (dflow.name || did) + '」？录制步骤将一并删除，MCP 工具将保留并移入「其他」。'
+        : '删除流程「' + (dflow.name || did) + '」？组内工具将移入「其他」。';
+      confirmDangerAction({
+        title: '删除流程',
+        message: msg,
+        confirmLabel: '删除流程'
+      }).then(function (ok) {
+        if (!ok) return;
+        var delResult = deleteFlowById(did);
+        if (!delResult.ok) {
+          showToast(delResult.error === 'RECORDING_ACTIVE' ? '请先结束录制' : '删除失败', 3000, 'error');
+          return;
+        }
+        if (state.mcpListUi.selectedFlowId === did) {
+          state.mcpListUi.selectedFlowId = null;
+          state.mcpListUi.inspectorOpen = false;
+        }
+        refreshMcpToolListViewLocal(mcpContent);
+        showToast('已删除流程', 2500, 'success');
+      });
+      return;
+    }
+
+    var openFlowBtn = ev.target && ev.target.closest ? ev.target.closest('.ai-req-mcp-flow-open-flow-btn') : null;
+    if (openFlowBtn) {
+      var ofid = openFlowBtn.getAttribute('data-flow-id');
+      if (ofid && typeof openFlowInWorkbench === 'function') openFlowInWorkbench(ofid);
+      return;
+    }
+
+    var pruneBtn = ev.target && ev.target.closest ? ev.target.closest('.ai-req-mcp-flow-prune-btn') : null;
+    if (pruneBtn) {
+      var pid = pruneBtn.getAttribute('data-flow-id');
+      var pr = pruneMissingToolRefs(pid);
+      refreshMcpToolListViewLocal(mcpContent);
+      showToast('已清理 ' + (pr.removed || 0) + ' 个缺失引用', 2000, 'success');
+      return;
+    }
+
     var row = ev.target && ev.target.closest ? ev.target.closest('.ai-req-mcp-table-row') : null;
     if (row && !ev.target.closest('input') && !ev.target.closest('button') && !ev.target.closest('label')) {
       var rowName = row.getAttribute('data-tool-name');
       if (rowName) {
         ensureMcpListUi();
+        state.mcpListUi.selectedFlowId = null;
         if (state.mcpListUi.selectedToolName === rowName) {
           if (state.ui && state.ui.layoutMode !== 'wide') {
             state.mcpListUi.inspectorOpen = !state.mcpListUi.inspectorOpen;
@@ -447,6 +786,12 @@ function bindMcpToolListRowEvents(mcpContent) {
     var btn = ev.target && ev.target.closest ? ev.target.closest('button[data-tool-name]') : null;
     if (!btn) return;
     var toolName = btn.getAttribute('data-tool-name');
+    if (btn.classList.contains('ai-req-mcp-tool-unassign-btn')) {
+      unassignToolsFromFlow([toolName]);
+      refreshMcpToolListViewLocal(mcpContent);
+      showToast('已移出流程', 2000, 'success');
+      return;
+    }
     if (btn.classList.contains('ai-req-mcp-tool-edit-btn')) {
       openMcpToolEditor(toolName);
       return;
@@ -528,13 +873,21 @@ function buildMcpToolListHTML() {
   html += '</div>';
   html += '<div class="ai-req-mcp-filter-row">';
   html += '<input type="search" class="ai-req-mcp-list-search" placeholder="\u641C\u7D22\u5DE5\u5177/\u63CF\u8FF0/path..." value="' + escapeHtml(ui.keyword || '') + '">';
+  html += '<select class="ai-req-mcp-view-mode" aria-label="视图模式">';
+  var vm = ui.viewMode || 'flowTree';
+  html += '<option value="flowTree"' + (vm === 'flowTree' ? ' selected' : '') + '>\u6D41\u7A0B\u6811</option>';
+  html += '<option value="flat"' + (vm === 'flat' ? ' selected' : '') + '>\u5E73\u94FA</option>';
+  html += '</select>';
+  html += '<span class="ai-req-mcp-group-select-wrap">';
   html += '<select class="ai-req-mcp-group-select">';
   var gm = ui.groupMode || 'none';
   html += '<option value="none"' + (gm === 'none' ? ' selected' : '') + '>\u5E73\u94FA</option>';
   html += '<option value="method"' + (gm === 'method' ? ' selected' : '') + '>\u6309\u65B9\u6CD5</option>';
   html += '<option value="risk"' + (gm === 'risk' ? ' selected' : '') + '>\u6309\u98CE\u9669</option>';
   html += '<option value="pathPrefix"' + (gm === 'pathPrefix' ? ' selected' : '') + '>\u6309\u8DEF\u5F84\u9996\u6BB5</option>';
+  html += '<option value="flow"' + (gm === 'flow' ? ' selected' : '') + '>\u6309\u6D41\u7A0B</option>';
   html += '</select>';
+  html += '</span>';
   var fe = ui.filterEnabled || 'all';
   html += '<button type="button" class="ai-req-mcp-fe-chip' + (fe === 'all' ? ' ai-req-chip-on' : '') + '" data-mcp-fe="all">\u5168\u90E8</button>';
   html += '<button type="button" class="ai-req-mcp-fe-chip' + (fe === 'on' ? ' ai-req-chip-on' : '') + '" data-mcp-fe="on">\u5DF2\u542F\u7528</button>';
@@ -545,6 +898,10 @@ function buildMcpToolListHTML() {
   html += '<button type="button" class="ai-req-mcp-risk-chip' + (risks.high ? ' ai-req-chip-on' : '') + '" data-mcp-risk="high">high</button>';
   html += '</div>';
   html += '<div class="ai-req-mcp-bulk-actions">';
+  html += '<button type="button" class="ai-req-btn ai-req-btn-primary ai-req-mcp-flow-create-btn">\u65B0\u5EFA\u6D41\u7A0B</button>';
+  html += '<select class="ai-req-mcp-move-to-flow-select"><option value="">\u79FB\u52A8\u5230\u6D41\u7A0B...</option></select>';
+  html += '<button type="button" class="ai-req-btn ai-req-btn-secondary ai-req-mcp-move-to-flow-btn">\u79FB\u52A8</button>';
+  html += '<button type="button" class="ai-req-btn ai-req-btn-secondary ai-req-mcp-unassign-flow-btn">\u79FB\u51FA\u6D41\u7A0B</button>';
   html += '<input type="file" accept="application/json,.json" class="ai-req-mcp-import-file-input" tabindex="-1" aria-hidden="true">';
   html += '<button type="button" class="ai-req-btn ai-req-btn-secondary ai-req-mcp-exp-all">\u5168\u90E8\u5BFC\u51FA</button>';
   html += '<button type="button" class="ai-req-btn ai-req-btn-secondary ai-req-mcp-exp-sel">\u5DF2\u9009\u5BFC\u51FA</button>';
@@ -905,6 +1262,73 @@ function bindMcpContentEvents(mcpContent) {
       ensureMcpListUi();
       state.mcpListUi.groupMode = grpSel.value || 'none';
       refreshMcpToolListViewLocal(mcpContent);
+    });
+  }
+
+  var viewModeSel = mcpContent.querySelector('.ai-req-mcp-view-mode');
+  if (viewModeSel) {
+    viewModeSel.addEventListener('change', function () {
+      ensureMcpListUi();
+      state.mcpListUi.viewMode = viewModeSel.value || 'flowTree';
+      syncMcpViewModeToolbar(mcpContent);
+      refreshMcpToolListViewLocal(mcpContent);
+    });
+  }
+
+  var flowCreateBtn = mcpContent.querySelector('.ai-req-mcp-flow-create-btn');
+  if (flowCreateBtn) {
+    flowCreateBtn.addEventListener('click', function () {
+      var name = prompt('新建流程名称', '未命名流程');
+      if (name === null) return;
+      var flow = createManualFlow(name);
+      ensureMcpListUi();
+      state.mcpListUi.selectedFlowId = flow.id;
+      state.mcpListUi.selectedToolName = null;
+      state.mcpListUi.inspectorOpen = true;
+      delete state.mcpListUi.collapsedFlowIds[flow.id];
+      refreshMcpToolListViewLocal(mcpContent);
+      showToast('已创建流程: ' + flow.name, 2500, 'success');
+    });
+  }
+
+  var moveFlowBtn = mcpContent.querySelector('.ai-req-mcp-move-to-flow-btn');
+  if (moveFlowBtn) {
+    moveFlowBtn.addEventListener('click', function () {
+      var names = getSelectedMcpToolNamesOrdered();
+      if (!names.length) {
+        showToast('请先勾选要移动的工具');
+        return;
+      }
+      var sel = mcpContent.querySelector('.ai-req-mcp-move-to-flow-select');
+      var targetId = sel && sel.value;
+      if (!targetId) {
+        showToast('请选择目标流程');
+        return;
+      }
+      var result = assignToolsToFlow(names, targetId);
+      if (!result.ok) {
+        showToast('移动失败: ' + (result.error || 'unknown'), 3000, 'error');
+        return;
+      }
+      state.selectedMcpToolNames = {};
+      if (sel) sel.value = '';
+      refreshMcpToolListViewLocal(mcpContent);
+      showToast('已移动 ' + result.moved + ' 个工具', 2500, 'success');
+    });
+  }
+
+  var unassignFlowBtn = mcpContent.querySelector('.ai-req-mcp-unassign-flow-btn');
+  if (unassignFlowBtn) {
+    unassignFlowBtn.addEventListener('click', function () {
+      var names = getSelectedMcpToolNamesOrdered();
+      if (!names.length) {
+        showToast('请先勾选要移出的工具');
+        return;
+      }
+      var result = unassignToolsFromFlow(names);
+      state.selectedMcpToolNames = {};
+      refreshMcpToolListViewLocal(mcpContent);
+      showToast('已移出 ' + result.moved + ' 个工具', 2500, 'success');
     });
   }
 
@@ -1271,8 +1695,9 @@ function applyMcpStatusBarState(mcpContent, resp) {
     if (resp && resp.helperConnected && resp.httpReady) {
       var port = resp.serverPort || 9527;
       var mcpUrl = resp.mcpUrl || ('http://127.0.0.1:' + port + '/mcp');
+      var tc = typeof resp.toolCount === 'number' ? resp.toolCount : 0;
       dotEl.className = 'ai-req-mcp-status-dot ai-req-mcp-status-dot-on';
-      textEl.textContent = 'MCP \u25CF \u5DF2\u542F\u52A8 ' + mcpUrl;
+      textEl.textContent = 'MCP \u25CF \u5DF2\u542F\u52A8 ' + mcpUrl + ' \u00B7 \u5DE5\u5177 ' + tc;
       btnEl.textContent = '\u505C\u6B62';
       btnEl.className = 'ai-req-mcp-start-btn ai-req-mcp-stop-btn';
     } else if (resp && resp.helperConnected && !resp.httpReady) {
@@ -1380,6 +1805,7 @@ function getSelectedMcpToolNamesOrdered() {
   var nm;
   for (nm in tm) {
     if (!Object.prototype.hasOwnProperty.call(tm, nm)) continue;
+    if (isFlowContextSystemToolName(nm)) continue;
     if (sm[nm]) outArr.push(nm);
   }
   return outArr;

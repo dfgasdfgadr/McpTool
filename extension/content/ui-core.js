@@ -173,6 +173,14 @@ function openMainPanelForFlowRecording() {
   refreshMainWorkbench();
 }
 
+function mountConfirmOverlay(overlay) {
+  if (state.mainPanel && state.mainPanel.parentNode) {
+    state.mainPanel.appendChild(overlay);
+    return;
+  }
+  safeAppendChild(overlay);
+}
+
 function showFlowMcpResultDialog(flow, stats) {
   var existing = document.querySelector('.ai-req-flow-mcp-result-overlay');
   if (existing) existing.remove();
@@ -226,11 +234,17 @@ function showFlowMcpResultDialog(flow, stats) {
   modal.appendChild(title);
   modal.appendChild(body);
   modal.appendChild(actions);
+  modal.addEventListener('click', function (e) {
+    e.stopPropagation();
+  });
   overlay.appendChild(modal);
   overlay.addEventListener('click', function (e) {
     if (e.target === overlay) overlay.remove();
   });
-  safeAppendChild(overlay);
+  mountConfirmOverlay(overlay);
+  requestAnimationFrame(function () {
+    if (viewBtn && viewBtn.focus) viewBtn.focus();
+  });
 }
 
 function finishFlowRecordingCommon(openMcpAfter) {
@@ -254,15 +268,21 @@ function finishFlowRecordingCommon(openMcpAfter) {
     state.mainPanel.setAttribute('data-ai-req-tab', 'flow');
   }
   refreshMainWorkbench();
+  var stats = { added: 0, skipped: 0, linked: 0 };
+  if (typeof generateMcpToolsFromFlow === 'function') {
+    stats = generateMcpToolsFromFlow(flow) || stats;
+  }
   if (openMcpAfter) {
-    var stats = { added: 0, skipped: 0 };
-    if (typeof generateMcpToolsFromFlow === 'function') {
-      stats = generateMcpToolsFromFlow(flow) || stats;
-    }
     state.ui.activeMainTab = 'mcp';
     state.mcpPanelTab = 'list';
     refreshMainWorkbench();
-    showFlowMcpResultDialog(flow, stats);
+    requestAnimationFrame(function () {
+      showFlowMcpResultDialog(flow, stats);
+    });
+  } else if (stats.added > 0 || stats.linked > 0) {
+    showToast('MCP 已同步：新增 ' + stats.added + '，关联 ' + stats.linked, 2500, 'success');
+  } else if (stats.skipped > 0) {
+    showToast('MCP 工具已更新并同步（' + stats.skipped + ' 个已存在）', 2500, 'success');
   }
   return flow;
 }
@@ -557,6 +577,149 @@ function renderFlowStepCard(flow, step) {
   return html;
 }
 
+function countFlowToolsetStats(flow) {
+  var names = (flow && flow.mcpToolNames) || [];
+  var toolsMap = state.mcpTools || {};
+  var stats = { total: names.length, available: 0, disabled: 0, missing: 0 };
+  for (var i = 0; i < names.length; i++) {
+    var t = toolsMap[names[i]];
+    if (!t) stats.missing++;
+    else if (t.enabled === false) stats.disabled++;
+    else stats.available++;
+  }
+  return stats;
+}
+
+function buildFlowToolsetHTML(flow) {
+  if (!flow) return '';
+  var stats = countFlowToolsetStats(flow);
+  var html = '';
+  html += '<div class="ai-req-flow-toolset">';
+  html += '  <div class="ai-req-flow-toolset-head"><strong>流程工具集</strong></div>';
+  html += '  <div class="ai-req-flow-toolset-stats">';
+  html += '    已关联 ' + stats.total + ' · 可用 ' + stats.available + ' · 禁用 ' + stats.disabled + ' · 缺失 ' + stats.missing;
+  html += '  </div>';
+  if (stats.total > 0) {
+    html += '  <ul class="ai-req-flow-toolset-list">';
+    for (var ti = 0; ti < flow.mcpToolNames.length; ti++) {
+      var tn = flow.mcpToolNames[ti];
+      var tool = (state.mcpTools || {})[tn];
+      var st = !tool ? 'missing' : (tool.enabled === false ? 'disabled' : 'available');
+      html += '    <li class="ai-req-flow-toolset-item ai-req-flow-toolset-' + st + '">' + escapeHtml(tn) + '</li>';
+    }
+    html += '  </ul>';
+  } else {
+    html += '  <div class="ai-req-flow-toolset-empty">尚未从已验证请求生成 MCP 工具。</div>';
+  }
+  html += '  <div class="ai-req-flow-toolset-actions">';
+  html += '    <button type="button" class="ai-req-btn ai-req-btn-secondary ai-req-flow-context-view-btn">查看流程上下文</button>';
+  html += '    <button type="button" class="ai-req-btn ai-req-btn-secondary ai-req-flow-mcp-manage-btn">在 MCP 页管理工具</button>';
+  html += '    <button type="button" class="ai-req-btn ai-req-btn-secondary ai-req-flow-context-sync-btn">同步到 MCP</button>';
+  html += '    <button type="button" class="ai-req-btn ai-req-btn-secondary ai-req-flow-context-copy-btn">复制 AI 使用提示</button>';
+  html += '  </div>';
+  html += '</div>';
+  return html;
+}
+
+function showFlowContextPreviewDialog(flow, payload) {
+  var existing = document.querySelector('.ai-req-flow-context-preview-overlay');
+  if (existing) existing.remove();
+  var overlay = document.createElement('div');
+  overlay.className = 'ai-req-confirm-overlay ai-req-flow-context-preview-overlay';
+  var modal = document.createElement('div');
+  modal.className = 'ai-req-confirm-modal ai-req-flow-context-preview-modal';
+  var title = document.createElement('div');
+  title.className = 'ai-req-confirm-title';
+  title.textContent = '流程上下文 · ' + (flow.name || '未命名流程');
+  var body = document.createElement('pre');
+  body.className = 'ai-req-flow-context-preview-body';
+  body.textContent = JSON.stringify(payload, null, 2);
+  var actions = document.createElement('div');
+  actions.className = 'ai-req-confirm-actions';
+  var closeBtn = document.createElement('button');
+  closeBtn.type = 'button';
+  closeBtn.className = 'ai-req-btn ai-req-btn-primary';
+  closeBtn.textContent = '关闭';
+  closeBtn.addEventListener('click', function () { overlay.remove(); });
+  actions.appendChild(closeBtn);
+  modal.appendChild(title);
+  modal.appendChild(body);
+  modal.appendChild(actions);
+  overlay.appendChild(modal);
+  mountConfirmOverlay(overlay);
+}
+
+function openFlowInWorkbench(flowId) {
+  ensureFlowState();
+  state.flowUi.selectedFlowId = flowId || null;
+  if (state.ui) state.ui.activeMainTab = 'flow';
+  refreshMainPanelContent();
+}
+
+function openMcpFlowManagement(flowId) {
+  ensureMcpListUi();
+  state.mcpListUi.scrollToFlowId = flowId || null;
+  state.mcpListUi.selectedFlowId = flowId || null;
+  state.mcpListUi.selectedToolName = null;
+  state.mcpListUi.inspectorOpen = !!flowId;
+  state.mcpPanelTab = 'list';
+  if (state.ui) state.ui.activeMainTab = 'mcp';
+  refreshMainPanelContent();
+}
+
+function bindFlowToolsetActions(pane, flow) {
+  if (!pane || !flow) return;
+  var viewBtn = pane.querySelector('.ai-req-flow-context-view-btn');
+  if (viewBtn) {
+    viewBtn.addEventListener('click', function () {
+      chrome.runtime.sendMessage({
+        type: 'MCP_GET_FLOW_CONTEXT',
+        flowId: flow.id,
+        flowName: flow.name || ''
+      }, function (resp) {
+        if (chrome.runtime.lastError) {
+          showToast('无法读取流程上下文', 3000, 'error');
+          return;
+        }
+        showFlowContextPreviewDialog(flow, resp || { ok: false });
+      });
+    });
+  }
+  var mcpManageBtn = pane.querySelector('.ai-req-flow-mcp-manage-btn');
+  if (mcpManageBtn) {
+    mcpManageBtn.addEventListener('click', function () {
+      openMcpFlowManagement(flow.id);
+    });
+  }
+  var syncBtn = pane.querySelector('.ai-req-flow-context-sync-btn');
+  if (syncBtn) {
+    syncBtn.addEventListener('click', function () {
+      chrome.runtime.sendMessage({ type: 'MCP_SYNC_TOOLS' }, function (resp) {
+        if (resp && resp.ok) showToast('已同步到 MCP helper', 2500, 'success');
+        else showToast((resp && resp.error) || '同步失败', 3000, 'error');
+      });
+    });
+  }
+  var copyBtn = pane.querySelector('.ai-req-flow-context-copy-btn');
+  if (copyBtn) {
+    copyBtn.addEventListener('click', function () {
+      var text =
+        '请使用“' + (flow.name || '未命名流程') + '”流程。' +
+        '先调用 get_recorded_flow_context 获取该流程相关工具，再根据我的目标选择具体工具。' +
+        '步骤仅供参考，不需要按顺序执行。';
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(function () {
+          showToast('已复制 AI 使用提示', 2000, 'success');
+        }).catch(function () {
+          showToast('复制失败', 2000, 'error');
+        });
+      } else {
+        showToast('当前环境不支持剪贴板复制', 2500, 'warn');
+      }
+    });
+  }
+}
+
 function refreshFlowWorkbench() {
   if (!state.mainPanel) return;
   ensureFlowState();
@@ -578,7 +741,8 @@ function refreshFlowWorkbench() {
   } else {
     for (var fi = 0; fi < flowIds.length; fi++) {
       var f = state.flows[flowIds[fi]];
-      html += '    <option value="' + escapeHtml(f.id) + '"' + (selected && selected.id === f.id ? ' selected' : '') + '>' + escapeHtml(f.name || f.id) + '</option>';
+      var kindTag = inferFlowKind(f) === 'manual' ? ' [手动]' : '';
+      html += '    <option value="' + escapeHtml(f.id) + '"' + (selected && selected.id === f.id ? ' selected' : '') + '>' + escapeHtml(f.name || f.id) + kindTag + '</option>';
     }
   }
   html += '  </select>';
@@ -605,9 +769,20 @@ function refreshFlowWorkbench() {
     ? countFlowStepsWithRequests(selected)
     : (selected.steps || []).length;
   html += '<div class="ai-req-flow-summary">';
-  html += '  <div><strong>' + escapeHtml(selected.name || '未命名流程') + '</strong><span>' + escapeHtml(selected.hostname || location.hostname) + '</span></div>';
-  html += '  <div>步骤 ' + stepCountDisplay + ' · 已验证请求 ' + verifiedCount + (state.activeFlowId === selected.id && state.flowRecording ? ' · 录制中' : '') + '</div>';
+  var selKind = inferFlowKind(selected);
+  html += '  <div><strong>' + escapeHtml(selected.name || '未命名流程') + '</strong>';
+  if (selKind === 'manual') html += ' <span class="ai-req-mcp-flow-kind-badge ai-req-mcp-flow-kind-manual">手动</span>';
+  html += '<span>' + escapeHtml(selected.hostname || location.hostname) + '</span></div>';
+  if (selKind === 'manual') {
+    html += '  <div>手动工具分组 · 已关联工具 ' + ((selected.mcpToolNames || []).length) + '</div>';
+  } else {
+    html += '  <div>步骤 ' + stepCountDisplay + ' · 已验证请求 ' + verifiedCount + (state.activeFlowId === selected.id && state.flowRecording ? ' · 录制中' : '') + '</div>';
+  }
   html += '</div>';
+  html += buildFlowToolsetHTML(selected);
+  if (selKind === 'manual') {
+    html += '<div class="ai-req-flow-empty">手动分组，无录制步骤。点击「在 MCP 页管理工具」调整工具归属。</div>';
+  } else {
   html += '<div class="ai-req-flow-steps">';
   var shownAny = false;
   var clsFilter = state.flowUi.filterClassification || 'all';
@@ -630,8 +805,10 @@ function refreshFlowWorkbench() {
     html += '<div class="ai-req-flow-empty">当前筛选下没有请求。</div>';
   }
   html += '</div>';
+  }
   pane.innerHTML = html;
   bindFlowWorkbench(pane);
+  bindFlowToolsetActions(pane, selected);
   restorePanelScroll('.ai-req-flow-steps', savedScrollTop);
 }
 
@@ -1151,6 +1328,12 @@ function createMainPanel() {
     '    <label class="ai-req-settings-check"><input type="checkbox" class="ai-req-settings-mcp-auto-sync"> 启动时自动同步工具列表</label>' +
     '  </div>' +
     '  <div class="ai-req-settings-section">' +
+    '    <div class="ai-req-settings-title">MCP 流程上下文工具</div>' +
+    '    <label class="ai-req-settings-check"><input type="checkbox" class="ai-req-settings-flow-ctx-list" checked> 暴露 list_recorded_flows</label>' +
+    '    <label class="ai-req-settings-check"><input type="checkbox" class="ai-req-settings-flow-ctx-detail" checked> 暴露 get_recorded_flow_context</label>' +
+    '    <div class="ai-req-settings-hint">关闭后需保存设置并重新同步 MCP；若 Cursor 仍显示旧列表，请在 MCP 设置页刷新服务器。</div>' +
+    '  </div>' +
+    '  <div class="ai-req-settings-section">' +
     '    <div class="ai-req-settings-title">工具生成配置</div>' +
     '    <label class="ai-req-settings-field"><span>MCP 工具命名</span><select class="ai-req-settings-input ai-req-settings-mcp-tool-naming"><option value="full">完整路径（默认）</option><option value="compact">紧凑（末段+哈希）</option></select></label>' +
     '    <label class="ai-req-settings-check"><input type="checkbox" class="ai-req-settings-enhanced-gen"> 增强 MCP 推断（非一键默认路径）</label>' +
@@ -1212,6 +1395,8 @@ function hydrateSettingsWorkbench() {
   setVal('.ai-req-settings-mcp-token', cfg.mcpToken || '');
   setVal('.ai-req-settings-mcp-tool-naming', cfg.mcpToolNaming === 'compact' ? 'compact' : 'full');
   setChecked('.ai-req-settings-mcp-auto-sync', !!cfg.mcpAutoSync);
+  setChecked('.ai-req-settings-flow-ctx-list', cfg.enableFlowContextListTool !== false);
+  setChecked('.ai-req-settings-flow-ctx-detail', cfg.enableFlowContextDetailTool !== false);
   setVal('.ai-req-settings-mcp-export-path', cfg.mcpExportPath || '');
   setChecked('.ai-req-settings-enhanced-gen', !!state.mcpUseEnhancedGeneration);
   var reqEnhCb = panel.querySelector('.ai-req-enhanced-gen-cb');
@@ -1247,10 +1432,15 @@ function saveSettingsWorkbench(panel) {
   state.config.mcpToken = val('.ai-req-settings-mcp-token');
   state.config.mcpToolNaming = val('.ai-req-settings-mcp-tool-naming') === 'compact' ? 'compact' : 'full';
   state.config.mcpAutoSync = checked('.ai-req-settings-mcp-auto-sync');
+  state.config.enableFlowContextListTool = checked('.ai-req-settings-flow-ctx-list');
+  state.config.enableFlowContextDetailTool = checked('.ai-req-settings-flow-ctx-detail');
   state.config.mcpExportPath = val('.ai-req-settings-mcp-export-path');
   syncEnhancedGenCheckboxes(root, checked('.ai-req-settings-enhanced-gen'));
   saveConfig();
   showToast('设置已保存', 2500, 'success');
+  try {
+    chrome.runtime.sendMessage({ type: 'MCP_SYNC_TOOLS' });
+  } catch (eSync) {}
 }
 
 function bindSettingsWorkbench(panel) {
@@ -2431,11 +2621,7 @@ function confirmDangerAction(opts) {
     modal.appendChild(bodyEl);
     modal.appendChild(actions);
     overlay.appendChild(modal);
-    if (state.mainPanel && state.mainPanel.parentNode) {
-      state.mainPanel.appendChild(overlay);
-    } else {
-      safeAppendChild(overlay);
-    }
+    mountConfirmOverlay(overlay);
     requestAnimationFrame(function () {
       okBtn.focus();
     });

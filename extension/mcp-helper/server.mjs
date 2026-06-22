@@ -41,6 +41,24 @@ let httpListening = false;
 let cachedTools = [];
 const pendingCalls = new Map();
 
+function broadcastToolsListChanged() {
+  const payload = JSON.stringify({
+    jsonrpc: '2.0',
+    method: 'notifications/tools/list_changed',
+  });
+  for (const [clientId, res] of httpClients.entries()) {
+    try {
+      if (res.writableEnded) {
+        httpClients.delete(clientId);
+        continue;
+      }
+      res.write(`event: message\ndata: ${payload}\n\n`);
+    } catch {
+      httpClients.delete(clientId);
+    }
+  }
+}
+
 // ==================== Native Messaging（stdin/stdout） ====================
 
 function readNMMessage() {
@@ -126,6 +144,7 @@ function handleNMMessage(msg) {
           return rest;
         });
       log(`已同步 ${cachedTools.length} 个工具`);
+      broadcastToolsListChanged();
       break;
     }
     case 'CALL_RESULT': {
@@ -291,7 +310,7 @@ function processMCPMessage(msg, sendResponse, clientInfo) {
       id: msg.id,
       result: {
         protocolVersion: '2025-03-26',
-        capabilities: { tools: {} },
+        capabilities: { tools: { listChanged: true } },
         serverInfo: { name: 'ai-request-analyzer-mcp', version: '1.0.0' },
       },
     });

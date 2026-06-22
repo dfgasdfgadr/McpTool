@@ -25,6 +25,7 @@
         "content/core.js",
         "content/ai-analysis.js",
         "content/mcp-engine.js",
+        "content/flow-membership.js",
         "content/ui-core.js",
         "content/mcp-ui.js",
         "content/isolated.js"
