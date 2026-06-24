@@ -75,7 +75,8 @@ var DEFAULT_CONFIG = {
   mcpToolNaming: 'full',
   mcpExportPath: '',
   enableFlowContextListTool: true,
-  enableFlowContextDetailTool: true
+  enableFlowContextDetailTool: true,
+  enableBrainstormMcpTool: true
 };
 
 var CONFIG_KEY = 'ai_req_analyzer_config';

@@ -47,6 +47,22 @@ function partitionMcpToolArguments(toolMeta, toolArguments) {
   return { pathname: resolvedPath, restArgs: rest };
 }
 
+function enrichBrainstormToolMeta(toolDef, toolMeta) {
+  if (!toolMeta || toolMeta.source !== 'system_brainstorm') return toolMeta;
+  if (toolMeta.method && toolMeta.pathname) return toolMeta;
+  var name = (toolDef && toolDef.name) || '';
+  var m = name.match(/^(get|post|put|patch|delete)_(.+)$/i);
+  if (!m) return toolMeta;
+  var enriched = Object.assign({}, toolMeta, {
+    method: m[1].toUpperCase(),
+    pathname: '/' + m[2].replace(/_/g, '/')
+  });
+  if (!enriched.origin && enriched.hostname) {
+    enriched.origin = 'https://' + enriched.hostname;
+  }
+  return enriched;
+}
+
 function normalizeMcpRequestBody(bodyData) {
   if (bodyData == null) return bodyData;
   if (Array.isArray(bodyData)) return bodyData;
@@ -181,6 +197,16 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
     return true;
   }
 
+  if (message.type === 'UPDATE_SITE_IDENTITY') {
+    var apiHostname = message.apiHostname;
+    var pageOrigin = message.pageOrigin || '';
+    var requestHeaders = message.requestHeaders || {};
+    persistSiteIdentityUpdate(apiHostname, pageOrigin, requestHeaders, function (result) {
+      sendResponse(result);
+    });
+    return true;
+  }
+
   if (message.type === 'MCP_GET_TOOLS_VIEW') {
     var siteFilterMv = message.siteFilter || 'all';
     var tabHostnameMv = message.currentTabHostname || '';
@@ -245,7 +271,7 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
           if (frec && frec.id) flowsById[frec.id] = frec;
         }
       }
-      var sysKeys = [FLOW_CONTEXT_LIST_TOOL, FLOW_CONTEXT_DETAIL_TOOL];
+      var sysKeys = getFlowContextSystemToolNames(flowCtxCfg);
       for (var sk = 0; sk < sysKeys.length; sk++) {
         if (toolsOut[sysKeys[sk]]) hostByToolOut[sysKeys[sk]] = '(system)';
       }
@@ -373,11 +399,13 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
         return;
       }
 
+      toolMeta = enrichBrainstormToolMeta(toolDef, toolMeta);
+      toolMeta = applyLiveSiteIdentityToToolMeta(toolMeta, items, toolMeta.hostname || matchedStorageHost);
       var origin = resolveToolOrigin(toolMeta, matchedStorageHost, senderTab);
       var built = buildMcpProxyPayload('test_' + Date.now(), testToolName, toolMeta, testArgs);
       var fullUrl = origin + built.pathname + built.queryString;
 
-      findBestTabForProxy(origin, fullUrl, built.pathname).then(function (tab) {
+      findBestTabForProxy(origin, fullUrl, built.pathname, toolMeta.sitePageOrigins).then(function (tab) {
         var tabCandidates = [];
         if (senderTab && typeof senderTab.id !== 'undefined') tabCandidates.push(senderTab);
         if (tab && (!senderTab || tab.id !== senderTab.id)) tabCandidates.push(tab);
@@ -884,7 +912,7 @@ function rewriteMcpProxyUrlForTab(tab, fullUrl) {
 }
 
 /** 依次尝试多个页面 origin，解决工具 _meta.origin 与用户当前标签 hostname 不一致时 tabs.query 匹配不到的问题（如云效主站 vs uiless 子域）。 */
-function findBestTabForProxy(resolvedOrigin, fullUrl, pathname) {
+function findBestTabForProxy(resolvedOrigin, fullUrl, pathname, pageOrigins) {
   var list = [];
   function addOriginCandidate(o) {
     var b = String(o || '').trim().replace(/\/+$/, '');
@@ -899,6 +927,11 @@ function findBestTabForProxy(resolvedOrigin, fullUrl, pathname) {
   var fullStr = String(fullUrl || '');
   if (pathStr.indexOf('/projex/') >= 0 || fullStr.indexOf('/projex/') >= 0) {
     addOriginCandidate('https://devops.aliyun.com');
+  }
+  if (pageOrigins && pageOrigins.length) {
+    for (var pi = 0; pi < pageOrigins.length; pi++) {
+      addOriginCandidate(pageOrigins[pi]);
+    }
   }
   function chain(i) {
     if (i >= list.length) return Promise.resolve(null);
@@ -1076,6 +1109,77 @@ function handleMcpToolCall(callId, toolName, toolArguments) {
   var startTime = Date.now();
   if (isFlowContextSystemTool(toolName)) {
     chrome.storage.local.get(null, function (items) {
+      if (toolName === BRAINSTORM_MCP_TOOL && toolArguments && toolArguments.confirmCreate === true) {
+        var prep = prepareBrainstormMcpToolCreate(toolArguments, items);
+        if (!prep.ok) {
+          prep.callId = callId;
+          addMcpCallLog({
+            timestamp: Date.now(),
+            toolName: toolName,
+            argsSummary: JSON.stringify(toolArguments || {}).substring(0, 200),
+            status: 0,
+            duration: Date.now() - startTime,
+            proxyMode: 'flow_context',
+            error: prep.message || prep.errorCode || 'brainstorm create error'
+          });
+          if (mcpState.helperPort && mcpState.helperConnected) {
+            mcpState.helperPort.postMessage({ type: 'CALL_RESULT', callId: callId, result: prep });
+          }
+          return;
+        }
+        var writePayload = {};
+        writePayload[prep.storageKey] = prep.toolsJson;
+        chrome.storage.local.set(writePayload, function () {
+          var sysResult;
+          if (chrome.runtime.lastError) {
+            sysResult = {
+              ok: false,
+              errorCode: 'CREATE_TOOL_FAILED',
+              message: '写入 storage 失败: ' + chrome.runtime.lastError.message
+            };
+          } else {
+            sysResult = {
+              ok: true,
+              mode: prep.mode || 'created',
+              createdToolName: prep.createdToolName,
+              createdToolNames: prep.createdToolNames || (prep.createdToolName ? [prep.createdToolName] : []),
+              createdCount: prep.createdCount || (prep.createdToolName ? 1 : 0),
+              failed: prep.failed || [],
+              failedCount: prep.failedCount || 0,
+              partial: !!prep.partial,
+              targetHost: prep.targetHost,
+              siteIdentityWarning: prep.siteIdentityWarning || null,
+              message: (prep.partial ?
+                ('已创建 ' + (prep.createdCount || 0) + ' 个 MCP 工具，' + (prep.failedCount || 0) + ' 个失败，并已同步。') :
+                ('已创建 ' + (prep.createdCount || 1) + ' 个 MCP 工具并同步。')) +
+                (prep.siteIdentityWarning ? (' ' + prep.siteIdentityWarning) : '')
+            };
+          }
+          sysResult.callId = callId;
+          addMcpCallLog({
+            timestamp: Date.now(),
+            toolName: toolName,
+            argsSummary: JSON.stringify(toolArguments || {}).substring(0, 200),
+            status: sysResult.ok ? 200 : 0,
+            duration: Date.now() - startTime,
+            proxyMode: 'flow_context',
+            error: sysResult.ok ? null : (sysResult.message || sysResult.errorCode || 'brainstorm create error')
+          });
+          if (!sysResult.ok) {
+            if (mcpState.helperPort && mcpState.helperConnected) {
+              mcpState.helperPort.postMessage({ type: 'CALL_RESULT', callId: callId, result: sysResult });
+            }
+            return;
+          }
+          syncToolsToHelper(function (syncResult) {
+            sysResult.synced = !!(syncResult && syncResult.synced);
+            if (mcpState.helperPort && mcpState.helperConnected) {
+              mcpState.helperPort.postMessage({ type: 'CALL_RESULT', callId: callId, result: sysResult });
+            }
+          });
+        });
+        return;
+      }
       var sysResult = executeFlowContextSystemTool(toolName, toolArguments, items);
       sysResult.callId = callId;
       addMcpCallLog({
@@ -1128,11 +1232,14 @@ function handleMcpToolCall(callId, toolName, toolArguments) {
       return;
     }
 
+    toolMeta = enrichBrainstormToolMeta(toolDef, toolMeta);
+    var identityHost = toolMeta.hostname || matchedStorageHost;
+    toolMeta = applyLiveSiteIdentityToToolMeta(toolMeta, items, identityHost);
     var origin = resolveToolOrigin(toolMeta, matchedStorageHost, null);
     var built = buildMcpProxyPayload(callId, toolName, toolMeta, toolArguments);
     var fullUrl = origin + built.pathname + built.queryString;
 
-    findBestTabForProxy(origin, fullUrl, built.pathname).then(function (tab) {
+    findBestTabForProxy(origin, fullUrl, built.pathname, toolMeta.sitePageOrigins).then(function (tab) {
       if (tab) {
         dispatchMcpProxyViaTabs([tab], built.payload, fullUrl, function (response, errMsg) {
           var result = response || { ok: false, error: errMsg || 'No response from content script', proxyMode: 'tab' };

@@ -2,21 +2,26 @@
 
 var FLOW_CONTEXT_LIST_TOOL = 'list_recorded_flows';
 var FLOW_CONTEXT_DETAIL_TOOL = 'get_recorded_flow_context';
+var BRAINSTORM_MCP_TOOL = 'brainstorm_mcp_tool';
 var FLOW_CONTEXT_FLOWS_PREFIX = 'ai_req_flows_';
 var FLOW_CONTEXT_TOOLS_PREFIX = 'ai_req_mcp_tools_';
+var SITE_IDENTITY_PREFIX = 'ai_req_site_identity_';
 var FLOW_CONTEXT_CONFIG_KEY = 'ai_req_analyzer_config';
 var FLOW_CONTEXT_GUIDANCE =
   '步骤仅用于理解业务语境，不要求按顺序执行。请根据用户目标选择最相关的工具。' +
   '不要仅因为参考步骤出现写操作就自动调用写工具，必须以用户当前明确目标为准。';
 
 function isFlowContextSystemTool(toolName) {
-  return toolName === FLOW_CONTEXT_LIST_TOOL || toolName === FLOW_CONTEXT_DETAIL_TOOL;
+  return toolName === FLOW_CONTEXT_LIST_TOOL ||
+    toolName === FLOW_CONTEXT_DETAIL_TOOL ||
+    toolName === BRAINSTORM_MCP_TOOL;
 }
 
 function parseExtensionConfigFromItems(items) {
   var cfg = {
     enableFlowContextListTool: true,
-    enableFlowContextDetailTool: true
+    enableFlowContextDetailTool: true,
+    enableBrainstormMcpTool: true
   };
   try {
     var raw = items && items[FLOW_CONTEXT_CONFIG_KEY];
@@ -25,6 +30,7 @@ function parseExtensionConfigFromItems(items) {
     if (parsed && typeof parsed === 'object') {
       if (parsed.enableFlowContextListTool === false) cfg.enableFlowContextListTool = false;
       if (parsed.enableFlowContextDetailTool === false) cfg.enableFlowContextDetailTool = false;
+      if (parsed.enableBrainstormMcpTool === false) cfg.enableBrainstormMcpTool = false;
     }
   } catch (e) {}
   return cfg;
@@ -59,6 +65,38 @@ function buildFlowContextSystemToolDefinitions(config) {
       },
       enabled: true,
       _meta: { flowContextSystem: true, kind: 'flow_context' }
+    };
+  }
+  if (config.enableBrainstormMcpTool !== false) {
+    defs[BRAINSTORM_MCP_TOOL] = {
+      name: BRAINSTORM_MCP_TOOL,
+      description:
+        '根据自然语言需求生成 MCP 工具草案（JSON）。' +
+        '首次调用传 intent，返回 draftJson 与命名/校验规则；用户明确确认后，再次调用并传 confirmCreate=true、targetHost、完整 draftJson 或 drafts[] 以创建工具。' +
+        '未获用户确认前不要传 confirmCreate=true。',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          intent: { type: 'string', description: '自然语言需求，草案阶段必填' },
+          targetHost: { type: 'string', description: '目标站点 hostname，创建阶段必填' },
+          preferredRiskLevel: {
+            type: 'string',
+            description: '风险等级偏好：low、medium 或 high'
+          },
+          confirmCreate: { type: 'boolean', description: 'true 时在用户确认后创建工具' },
+          draftJson: {
+            type: 'object',
+            description: '完整 MCP 草案对象；创建单个工具时必填'
+          },
+          drafts: {
+            type: 'array',
+            description: '完整 MCP 草案数组；创建多个工具时使用，按部分成功策略处理',
+            items: { type: 'object' }
+          }
+        }
+      },
+      enabled: true,
+      _meta: { flowContextSystem: true, kind: 'brainstorm_mcp_tool' }
     };
   }
   return defs;
@@ -399,6 +437,344 @@ function handleGetRecordedFlowContext(dataset, toolArguments) {
   };
 }
 
+var BRAINSTORM_TOOL_NAME_RE = /^[a-zA-Z0-9_]+$/;
+var BRAINSTORM_RISK_LEVELS = { low: true, medium: true, high: true };
+
+function getFlowContextSystemToolNames(config) {
+  return Object.keys(buildFlowContextSystemToolDefinitions(config || {}));
+}
+
+function buildBrainstormError(errorCode, message) {
+  return { ok: false, errorCode: errorCode, message: message };
+}
+
+function isValidBrainstormToolName(name) {
+  return typeof name === 'string' && name.length > 0 && BRAINSTORM_TOOL_NAME_RE.test(name);
+}
+
+function validateBrainstormDraftJson(draftJson) {
+  if (!draftJson || typeof draftJson !== 'object' || Array.isArray(draftJson)) {
+    return buildBrainstormError('DRAFT_REQUIRED', 'draftJson 必须是对象。');
+  }
+  if (!isValidBrainstormToolName(draftJson.name)) {
+    return buildBrainstormError('INVALID_TOOL_NAME', '工具名只能包含字母、数字和下划线，且不能为空。');
+  }
+  var schema = draftJson.inputSchema;
+  if (!schema || typeof schema !== 'object' || Array.isArray(schema) || schema.type !== 'object') {
+    return buildBrainstormError('INVALID_INPUT_SCHEMA', 'inputSchema.type 必须是 object。');
+  }
+  var risk = draftJson.riskLevel || 'low';
+  if (!BRAINSTORM_RISK_LEVELS[risk]) {
+    return buildBrainstormError('INVALID_RISK_LEVEL', 'riskLevel 只能是 low、medium 或 high。');
+  }
+  return { ok: true, draft: draftJson, riskLevel: risk };
+}
+
+function normalizeBrainstormDrafts(toolArguments) {
+  var args = toolArguments || {};
+  if (Array.isArray(args.drafts)) {
+    if (args.drafts.length === 0) {
+      return buildBrainstormError('DRAFT_REQUIRED', 'drafts 至少需要包含一个草案。');
+    }
+    return { ok: true, drafts: args.drafts, batch: true };
+  }
+  if (!args.draftJson) {
+    return buildBrainstormError('DRAFT_REQUIRED', '创建阶段必须提供完整 draftJson 或 drafts。');
+  }
+  return { ok: true, drafts: [args.draftJson], batch: false };
+}
+
+function buildBrainstormMcpDraftProtocol(toolArguments) {
+  var args = toolArguments || {};
+  var intent = args.intent;
+  if (!intent || typeof intent !== 'string' || !intent.trim()) {
+    return buildBrainstormError('INTENT_REQUIRED', '草案阶段必须提供 intent。');
+  }
+  var preferredRisk = args.preferredRiskLevel || 'low';
+  if (!BRAINSTORM_RISK_LEVELS[preferredRisk]) {
+    preferredRisk = 'low';
+  }
+  return {
+    ok: true,
+    mode: 'draft',
+    intent: intent.trim(),
+    targetHostHint: args.targetHost ? String(args.targetHost) : '',
+    draftJson: {
+      name: '',
+      description: '',
+      inputSchema: { type: 'object', properties: {}, required: [] },
+      riskLevel: preferredRisk,
+      implementationNotes: '',
+      questions: []
+    },
+    drafts: [],
+    namingRules: [
+      'name 只能包含 a-z、A-Z、0-9 和下划线',
+      '建议用动词开头，例如 get_product_list'
+    ],
+    schemaRules: [
+      'inputSchema.type 必须是 object',
+      'properties 只描述用户需要填写的参数',
+      'required 只包含真正必填字段'
+    ],
+    riskRules: [
+      '只读查询默认 low',
+      '修改、提交、删除类操作至少 medium',
+      '支付、审批、批量删除等高影响操作为 high'
+    ],
+    validationRules: [
+      '创建前必须获得用户明确确认',
+      '创建前必须提供 targetHost',
+      '创建前必须检查同名冲突',
+      '批量创建可传 drafts[]；有效项会创建，失败项会逐条返回错误'
+    ],
+    nextStep:
+      '请根据 intent 填充 draftJson 或 drafts[]，展示给用户确认；用户确认后再以 confirmCreate=true 调用本工具。'
+  };
+}
+
+function parseHostToolsFromItems(items, targetHost) {
+  var key = FLOW_CONTEXT_TOOLS_PREFIX + targetHost;
+  var raw = items && items[key];
+  if (!raw) return {};
+  try {
+    var parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch (e) {
+    return {};
+  }
+}
+
+function siteIdentityStorageKey(hostname) {
+  return SITE_IDENTITY_PREFIX + String(hostname || '').trim();
+}
+
+function stripSensitiveHeadersForStorage(headers) {
+  var sensitive = ['cookie', 'authorization', 'set-cookie', 'proxy-authorization', 'www-authenticate', 'proxy-authenticate'];
+  var result = {};
+  var keys = Object.keys(headers || {});
+  for (var i = 0; i < keys.length; i++) {
+    var key = keys[i];
+    if (sensitive.indexOf(String(key).toLowerCase()) === -1) {
+      result[key] = headers[key];
+    }
+  }
+  return result;
+}
+
+function detectAuthTypeFromHeaders(headers) {
+  if (!headers || typeof headers !== 'object') return 'none';
+  var keys = Object.keys(headers);
+  for (var i = 0; i < keys.length; i++) {
+    var k = keys[i];
+    var v = headers[k];
+    if (/^authorization$/i.test(k) && typeof v === 'string' && v.indexOf('Bearer') === 0) {
+      return 'bearer';
+    }
+  }
+  for (var j = 0; j < keys.length; j++) {
+    if (/^cookie$/i.test(keys[j])) return 'cookie';
+  }
+  for (var x = 0; x < keys.length; x++) {
+    if (/^x-/i.test(keys[x])) return 'custom';
+  }
+  return 'none';
+}
+
+function parseSiteIdentityFromItems(items, hostname) {
+  if (!items || !hostname) return null;
+  return parseStoredJsonObject(items[siteIdentityStorageKey(hostname)]);
+}
+
+function mergeSiteIdentityRecord(existing, apiHostname, pageOrigin, requestHeaders) {
+  var prev = existing && typeof existing === 'object' ? existing : {};
+  var pageOrigins = Array.isArray(prev.pageOrigins) ? prev.pageOrigins.slice() : [];
+  if (pageOrigin && pageOrigins.indexOf(pageOrigin) < 0) pageOrigins.push(pageOrigin);
+  return {
+    apiHostname: apiHostname,
+    rawRequestHeaders: requestHeaders || {},
+    sampleRequestHeaders: stripSensitiveHeadersForStorage(requestHeaders || {}),
+    detectedAuthType: detectAuthTypeFromHeaders(requestHeaders || {}),
+    updatedAt: Date.now(),
+    pageOrigins: pageOrigins,
+    lastPageOrigin: pageOrigin || prev.lastPageOrigin || ''
+  };
+}
+
+function bindSiteIdentityToToolMeta(meta, items, targetHost) {
+  if (!meta || !targetHost) return meta;
+  var identity = parseSiteIdentityFromItems(items, targetHost);
+  if (!identity) return meta;
+  if (identity.rawRequestHeaders) meta.rawRequestHeaders = identity.rawRequestHeaders;
+  if (identity.sampleRequestHeaders) meta.sampleRequestHeaders = identity.sampleRequestHeaders;
+  if (identity.detectedAuthType) meta.detectedAuthType = identity.detectedAuthType;
+  if (identity.pageOrigins && identity.pageOrigins.length) meta.sitePageOrigins = identity.pageOrigins.slice();
+  meta.siteIdentityBoundAt = Date.now();
+  meta.siteIdentitySourceHost = targetHost;
+  return meta;
+}
+
+function applyLiveSiteIdentityToToolMeta(toolMeta, items, hostname) {
+  if (!toolMeta || !hostname) return toolMeta;
+  var identity = parseSiteIdentityFromItems(items, hostname);
+  if (!identity) return toolMeta;
+  var merged = Object.assign({}, toolMeta);
+  if (identity.rawRequestHeaders) merged.rawRequestHeaders = identity.rawRequestHeaders;
+  if (identity.sampleRequestHeaders) merged.sampleRequestHeaders = identity.sampleRequestHeaders;
+  if (identity.detectedAuthType) merged.detectedAuthType = identity.detectedAuthType;
+  if (identity.pageOrigins && identity.pageOrigins.length) {
+    merged.sitePageOrigins = identity.pageOrigins.slice();
+  }
+  merged.siteIdentityUpdatedAt = identity.updatedAt || null;
+  return merged;
+}
+
+function shouldPersistSiteIdentity(apiHostname, requestHeaders) {
+  if (!apiHostname || !requestHeaders || typeof requestHeaders !== 'object') return false;
+  if (detectAuthTypeFromHeaders(requestHeaders) !== 'none') return true;
+  var keys = Object.keys(requestHeaders);
+  for (var i = 0; i < keys.length; i++) {
+    if (/^content-type$/i.test(keys[i])) {
+      var ct = String(requestHeaders[keys[i]] || '').toLowerCase();
+      if (ct.indexOf('application/json') >= 0) return true;
+    }
+  }
+  return false;
+}
+
+function persistSiteIdentityUpdate(apiHostname, pageOrigin, requestHeaders, callback) {
+  if (!shouldPersistSiteIdentity(apiHostname, requestHeaders)) {
+    if (typeof callback === 'function') callback({ ok: false, skipped: true });
+    return;
+  }
+  var storageKey = siteIdentityStorageKey(apiHostname);
+  chrome.storage.local.get(storageKey, function (items) {
+    var existing = parseStoredJsonObject(items[storageKey]);
+    var record = mergeSiteIdentityRecord(existing, apiHostname, pageOrigin, requestHeaders);
+    var payload = {};
+    payload[storageKey] = JSON.stringify(record);
+    chrome.storage.local.set(payload, function () {
+      if (typeof callback === 'function') {
+        callback({
+          ok: !chrome.runtime.lastError,
+          apiHostname: apiHostname,
+          updatedAt: record.updatedAt,
+          error: chrome.runtime.lastError ? chrome.runtime.lastError.message : null
+        });
+      }
+    });
+  });
+}
+
+function buildBrainstormMcpToolRecord(draft, targetHost, riskLevel, items) {
+  var httpMeta = draft.httpMeta && typeof draft.httpMeta === 'object' ? draft.httpMeta : {};
+  var method = draft.method || httpMeta.method || '';
+  var pathname = draft.pathname || httpMeta.pathname || '';
+  var origin = draft.origin || httpMeta.origin || ('https://' + targetHost);
+  var sampleRequestHeaders = draft.sampleRequestHeaders || httpMeta.sampleRequestHeaders || null;
+  var meta = {
+    source: 'system_brainstorm',
+    riskLevel: riskLevel,
+    createdAt: Date.now(),
+    hostname: targetHost,
+    systemCreated: true,
+    implementationNotes: draft.implementationNotes || '',
+    origin: origin
+  };
+  if (method) meta.method = method;
+  if (pathname) meta.pathname = pathname;
+  if (sampleRequestHeaders) meta.sampleRequestHeaders = sampleRequestHeaders;
+  bindSiteIdentityToToolMeta(meta, items, targetHost);
+  return {
+    name: draft.name,
+    description: draft.description || '',
+    inputSchema: draft.inputSchema,
+    enabled: true,
+    _meta: meta
+  };
+}
+
+function prepareBrainstormMcpToolCreate(toolArguments, items) {
+  var args = toolArguments || {};
+  var targetHost = args.targetHost;
+  if (!targetHost || typeof targetHost !== 'string' || !targetHost.trim()) {
+    return buildBrainstormError('TARGET_HOST_REQUIRED', '创建阶段必须提供 targetHost。');
+  }
+  targetHost = targetHost.trim();
+  var normalized = normalizeBrainstormDrafts(args);
+  if (!normalized.ok) return normalized;
+  var toolsObj = parseHostToolsFromItems(items, targetHost);
+  var createdToolNames = [];
+  var failed = [];
+  for (var di = 0; di < normalized.drafts.length; di++) {
+    var validation = validateBrainstormDraftJson(normalized.drafts[di]);
+    if (!validation.ok) {
+      failed.push({
+        index: di,
+        name: normalized.drafts[di] && normalized.drafts[di].name ? String(normalized.drafts[di].name) : '',
+        errorCode: validation.errorCode,
+        message: validation.message
+      });
+      continue;
+    }
+    var draft = validation.draft;
+    var riskLevel = validation.riskLevel;
+    if (toolsObj[draft.name]) {
+      failed.push({
+        index: di,
+        name: draft.name,
+        errorCode: 'TOOL_NAME_CONFLICT',
+        message: '目标站点已存在同名工具: ' + draft.name
+      });
+      continue;
+    }
+    if (isFlowContextSystemTool(draft.name)) {
+      failed.push({
+        index: di,
+        name: draft.name,
+        errorCode: 'TOOL_NAME_CONFLICT',
+        message: '不能与系统工具同名: ' + draft.name
+      });
+      continue;
+    }
+    toolsObj[draft.name] = buildBrainstormMcpToolRecord(draft, targetHost, riskLevel, items);
+    createdToolNames.push(draft.name);
+  }
+  if (!createdToolNames.length) {
+    return {
+      ok: false,
+      errorCode: normalized.batch ? 'BATCH_CREATE_FAILED' : (failed[0] && failed[0].errorCode) || 'CREATE_TOOL_FAILED',
+      message: normalized.batch ? '批量创建失败，没有工具被创建。' : ((failed[0] && failed[0].message) || '创建失败。'),
+      createdToolNames: [],
+      failed: failed
+    };
+  }
+  var siteIdentity = parseSiteIdentityFromItems(items, targetHost);
+  var siteIdentityWarning = '';
+  if (!siteIdentity || !siteIdentity.rawRequestHeaders || !Object.keys(siteIdentity.rawRequestHeaders).length) {
+    siteIdentityWarning =
+      '未找到目标站点 ' + targetHost + ' 的已拦截请求身份；请先在浏览器访问该站点并触发 API 请求后再调用 MCP。';
+  }
+  return {
+    ok: true,
+    mode: normalized.batch ? 'batch_created' : 'created',
+    storageKey: FLOW_CONTEXT_TOOLS_PREFIX + targetHost,
+    toolsJson: JSON.stringify(toolsObj),
+    createdToolName: createdToolNames[0],
+    createdToolNames: createdToolNames,
+    createdCount: createdToolNames.length,
+    failed: failed,
+    failedCount: failed.length,
+    targetHost: targetHost,
+    partial: normalized.batch && failed.length > 0,
+    siteIdentityWarning: siteIdentityWarning || null
+  };
+}
+
+function handleBrainstormMcpTool(toolArguments) {
+  return buildBrainstormMcpDraftProtocol(toolArguments || {});
+}
+
 function executeFlowContextSystemTool(toolName, toolArguments, items) {
   try {
     var dataset = buildRecordedFlowDataset(items);
@@ -407,6 +783,9 @@ function executeFlowContextSystemTool(toolName, toolArguments, items) {
     }
     if (toolName === FLOW_CONTEXT_DETAIL_TOOL) {
       return handleGetRecordedFlowContext(dataset, toolArguments);
+    }
+    if (toolName === BRAINSTORM_MCP_TOOL) {
+      return handleBrainstormMcpTool(toolArguments);
     }
     return {
       ok: false,

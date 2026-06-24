@@ -38,8 +38,14 @@ function getFlowById(flowId) {
 
 function syncFlowIntoViewDataset(flow) {
   if (!flow || !flow.id) return;
+  var flowSnapshot;
+  try {
+    flowSnapshot = JSON.parse(JSON.stringify(flow));
+  } catch (e) {
+    flowSnapshot = flow;
+  }
   if (state.mcpViewDataset && state.mcpViewDataset.flowsById) {
-    state.mcpViewDataset.flowsById[flow.id] = flow;
+    state.mcpViewDataset.flowsById[flow.id] = flowSnapshot;
   }
   if (flow.hostname === '*') return;
   if (flow.hostname === location.hostname || !flow.hostname) {
@@ -105,8 +111,28 @@ function loadToolForMembership(toolName) {
   return { host: host, tool: toolsObj[toolName] || null, toolsObj: toolsObj };
 }
 
-function persistToolForMembership(host, toolsObj) {
+function persistToolForMembership(host, toolsObj, toolName) {
   persistToolsObjectForHostname(host, toolsObj);
+  if (toolName && toolsObj && toolsObj[toolName]) {
+    syncToolIntoViewDataset(toolName, toolsObj[toolName]);
+  }
+}
+
+function syncToolIntoViewDataset(toolName, toolDef) {
+  if (!toolName || !toolDef) return;
+  var snapshot;
+  try {
+    snapshot = JSON.parse(JSON.stringify(toolDef));
+  } catch (e) {
+    snapshot = toolDef;
+  }
+  var ds = state.mcpViewDataset;
+  if (ds && ds.tools && typeof ds.tools === 'object' && Object.prototype.hasOwnProperty.call(ds.tools, toolName)) {
+    ds.tools[toolName] = snapshot;
+  }
+  if (state.mcpTools && typeof state.mcpTools === 'object' && Object.prototype.hasOwnProperty.call(state.mcpTools, toolName)) {
+    state.mcpTools[toolName] = snapshot;
+  }
 }
 
 function removeToolFromFlowIndex(flow, toolName) {
@@ -233,7 +259,7 @@ function assignToolsToFlow(toolNames, targetFlowId, options) {
     }
     appendToolToFlowIndex(flow, toolName);
     setToolFlowMeta(loaded.tool, flow, loaded.host);
-    persistToolForMembership(loaded.host, loaded.toolsObj);
+    persistToolForMembership(loaded.host, loaded.toolsObj, toolName);
     moved++;
   }
   if (moved > 0) {
@@ -261,7 +287,7 @@ function unassignToolsFromFlow(toolNames, options) {
       persistFlowRecord(oldFlow);
     }
     setToolFlowMeta(loaded.tool, null);
-    persistToolForMembership(loaded.host, loaded.toolsObj);
+    persistToolForMembership(loaded.host, loaded.toolsObj, toolName);
     count++;
   }
   if (count > 0 && options.sync !== false) syncFlowMembershipAndMcp();
@@ -285,7 +311,7 @@ function renameFlow(flowId, newName) {
     var loaded = loadToolForMembership(tn);
     if (!loaded.tool) continue;
     setToolFlowMeta(loaded.tool, flow, loaded.host);
-    persistToolForMembership(loaded.host, loaded.toolsObj);
+    persistToolForMembership(loaded.host, loaded.toolsObj, tn);
   }
   syncFlowMembershipAndMcp();
   return { ok: true, flow: flow };

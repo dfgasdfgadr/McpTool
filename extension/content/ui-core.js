@@ -1337,6 +1337,7 @@ function createMainPanel() {
     '    <div class="ai-req-settings-title">MCP 流程上下文工具</div>' +
     '    <label class="ai-req-settings-check"><input type="checkbox" class="ai-req-settings-flow-ctx-list" checked> 暴露 list_recorded_flows</label>' +
     '    <label class="ai-req-settings-check"><input type="checkbox" class="ai-req-settings-flow-ctx-detail" checked> 暴露 get_recorded_flow_context</label>' +
+    '    <label class="ai-req-settings-check"><input type="checkbox" class="ai-req-settings-flow-ctx-brainstorm" checked> 暴露 brainstorm_mcp_tool</label>' +
     '    <div class="ai-req-settings-hint">关闭后需保存设置并重新同步 MCP；若 Cursor 仍显示旧列表，请在 MCP 设置页刷新服务器。</div>' +
     '  </div>' +
     '  <div class="ai-req-settings-section">' +
@@ -1403,6 +1404,7 @@ function hydrateSettingsWorkbench() {
   setChecked('.ai-req-settings-mcp-auto-sync', !!cfg.mcpAutoSync);
   setChecked('.ai-req-settings-flow-ctx-list', cfg.enableFlowContextListTool !== false);
   setChecked('.ai-req-settings-flow-ctx-detail', cfg.enableFlowContextDetailTool !== false);
+  setChecked('.ai-req-settings-flow-ctx-brainstorm', cfg.enableBrainstormMcpTool !== false);
   setVal('.ai-req-settings-mcp-export-path', cfg.mcpExportPath || '');
   setChecked('.ai-req-settings-enhanced-gen', !!state.mcpUseEnhancedGeneration);
   var reqEnhCb = panel.querySelector('.ai-req-enhanced-gen-cb');
@@ -1440,6 +1442,7 @@ function saveSettingsWorkbench(panel) {
   state.config.mcpAutoSync = checked('.ai-req-settings-mcp-auto-sync');
   state.config.enableFlowContextListTool = checked('.ai-req-settings-flow-ctx-list');
   state.config.enableFlowContextDetailTool = checked('.ai-req-settings-flow-ctx-detail');
+  state.config.enableBrainstormMcpTool = checked('.ai-req-settings-flow-ctx-brainstorm');
   state.config.mcpExportPath = val('.ai-req-settings-mcp-export-path');
   syncEnhancedGenCheckboxes(root, checked('.ai-req-settings-enhanced-gen'));
   saveConfig();

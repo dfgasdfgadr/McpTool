@@ -79,11 +79,19 @@ function setMcpFlowDropHighlight(el, ok) {
 
 function handleMcpFlowDrop(mcpContent, target, dragNames, sourceFlowId) {
   if (!target || !dragNames || !dragNames.length) return;
+  function refreshList() {
+    if (!mcpContent || !mcpContent.querySelector) return;
+    if (!mcpContent.querySelector('.ai-req-mcp-tool-list')) {
+      var panel = document.querySelector('.ai-req-mcp-content');
+      if (panel) mcpContent = panel;
+    }
+    refreshMcpToolListViewLocal(mcpContent);
+  }
   if (target.type === 'header') {
     if (target.groupKey === '__system__') return;
     if (target.groupKey === '__other__') {
       var ur = unassignToolsFromFlow(dragNames);
-      refreshMcpToolListViewLocal(mcpContent);
+      refreshList();
       if (typeof showToast === 'function') {
         showToast('已移出 ' + ur.moved + ' 个工具', 2500, 'success');
       }
@@ -91,7 +99,7 @@ function handleMcpFlowDrop(mcpContent, target, dragNames, sourceFlowId) {
     }
     if (target.flowId) {
       var ar = assignToolsToFlow(dragNames, target.flowId);
-      refreshMcpToolListViewLocal(mcpContent);
+      refreshList();
       if (typeof showToast === 'function') {
         if (ar.rejected > 0) {
           showToast('该流程仅支持同站点工具', 3000, 'error');
@@ -110,7 +118,7 @@ function handleMcpFlowDrop(mcpContent, target, dragNames, sourceFlowId) {
       if (!flow) return;
       var newOrder = insertToolsInFlowOrder(flow, dragNames, target.toolName);
       reorderToolsInFlow(flowId, newOrder);
-      refreshMcpToolListViewLocal(mcpContent);
+      refreshList();
       if (typeof showToast === 'function') {
         showToast('已更新顺序（' + dragNames.length + ' 个工具）', 2500, 'success');
       }
@@ -119,7 +127,7 @@ function handleMcpFlowDrop(mcpContent, target, dragNames, sourceFlowId) {
     var assignResult = assignToolsToFlow(dragNames, flowId);
     if (assignResult.rejected > 0) {
       if (typeof showToast === 'function') showToast('该流程仅支持同站点工具', 3000, 'error');
-      refreshMcpToolListViewLocal(mcpContent);
+      refreshList();
       return;
     }
     var updatedFlow = getFlowById(flowId);
@@ -127,7 +135,7 @@ function handleMcpFlowDrop(mcpContent, target, dragNames, sourceFlowId) {
       var ordered = insertToolsInFlowOrder(updatedFlow, dragNames, target.toolName);
       reorderToolsInFlow(flowId, ordered);
     }
-    refreshMcpToolListViewLocal(mcpContent);
+    refreshList();
     if (typeof showToast === 'function' && assignResult.moved > 0) {
       showToast('已移入「' + (updatedFlow && updatedFlow.name ? updatedFlow.name : flowId) + '」', 2500, 'success');
     }

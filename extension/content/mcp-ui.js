@@ -151,6 +151,59 @@ function updateMcpSelectionStrip(mcpContent) {
   if (spn) spn.textContent = '已选 ' + n;
 }
 
+function stringifyMcpPromptSchema(tool) {
+  try {
+    return JSON.stringify(tool.inputSchema || { type: 'object', properties: {} }, null, 2);
+  } catch (e) {
+    return '{"type":"object","properties":{}}';
+  }
+}
+
+function buildMcpToolCopyPrompt(toolName) {
+  var toolsMap = getMcpListToolsMap();
+  var tool = toolsMap[toolName];
+  if (!tool) return '';
+  var meta = tool._meta || {};
+  var isSystem = isFlowContextSystemToolName(toolName) || !!meta.flowContextSystem;
+  var host = isSystem ? '(system)' : resolveMcpToolHostFromView(toolName);
+  var route = isSystem ? '系统工具' : (((meta.method || 'GET').toUpperCase() + ' ' + (meta.pathname || '')).trim() || '-');
+  return [
+    '请优先使用 MCP 工具 `' + toolName + '` 来完成我的请求。',
+    '',
+    '工具说明：' + (tool.description || '无'),
+    '来源站点：' + host,
+    '调用入口：' + route,
+    '风险等级：' + ((meta.riskLevel || 'low')),
+    '',
+    '参数 Schema：',
+    stringifyMcpPromptSchema(tool),
+    '',
+    '请根据我的自然语言目标补齐参数；如果必要参数缺失，先向我确认，不要猜测高风险操作。'
+  ].join('\n');
+}
+
+function copyTextToClipboard(text, onSuccess, onFailure) {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(onSuccess).catch(onFailure);
+    return;
+  }
+  try {
+    var ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', 'readonly');
+    ta.style.position = 'fixed';
+    ta.style.left = '-9999px';
+    document.body.appendChild(ta);
+    ta.select();
+    var ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    if (ok) onSuccess();
+    else onFailure();
+  } catch (e) {
+    onFailure();
+  }
+}
+
 function buildMcpToolInspectorHTML(toolName) {
   var toolsMap = getMcpListToolsMap();
   var tool = toolsMap[toolName];
@@ -171,6 +224,9 @@ function buildMcpToolInspectorHTML(toolName) {
     sysHtml += '<div class="ai-req-mcp-inspector-section">';
     sysHtml += '<div class="ai-req-detail-label">说明</div>';
     sysHtml += '<div class="ai-req-detail-value">系统工具由扩展固定提供，不可删除或禁用。可在设置页控制是否暴露给 Cursor。</div>';
+    sysHtml += '</div>';
+    sysHtml += '<div class="ai-req-mcp-inspector-actions">';
+    sysHtml += '<button type="button" class="ai-req-btn ai-req-btn-primary ai-req-mcp-tool-copy-prompt-btn" data-tool-name="' + escapeHtml(toolName) + '">复制提示词</button>';
     sysHtml += '</div>';
     return sysHtml;
   }
@@ -235,10 +291,11 @@ function buildMcpToolInspectorHTML(toolName) {
   }
   html += '</div>';
   html += '<div class="ai-req-mcp-inspector-actions">';
+  html += '<button type="button" class="ai-req-btn ai-req-btn-primary ai-req-mcp-tool-copy-prompt-btn" data-tool-name="' + escapeHtml(toolName) + '">复制提示词</button>';
   if (flowMeta) {
     html += '<button type="button" class="ai-req-btn ai-req-btn-secondary ai-req-mcp-tool-unassign-btn" data-tool-name="' + escapeHtml(toolName) + '">移出流程</button>';
   }
-  html += '<button type="button" class="ai-req-btn ai-req-btn-primary ai-req-mcp-tool-edit-btn" data-tool-name="' + escapeHtml(toolName) + '">编辑</button>';
+  html += '<button type="button" class="ai-req-btn ai-req-btn-secondary ai-req-mcp-tool-edit-btn" data-tool-name="' + escapeHtml(toolName) + '">编辑</button>';
   html += '<button type="button" class="ai-req-btn ai-req-btn-secondary ai-req-mcp-tool-test-btn" data-tool-name="' + escapeHtml(toolName) + '">测试</button>';
   html += '<button type="button" class="ai-req-btn ai-req-btn-danger ai-req-mcp-tool-delete-btn" data-tool-name="' + escapeHtml(toolName) + '">删除</button>';
   html += '</div>';
@@ -355,7 +412,9 @@ function mcpToolMatchesKeyword(tool, name, kwLower) {
 }
 
 function isFlowContextSystemToolName(name) {
-  return name === 'list_recorded_flows' || name === 'get_recorded_flow_context';
+  return name === 'list_recorded_flows' ||
+    name === 'get_recorded_flow_context' ||
+    name === 'brainstorm_mcp_tool';
 }
 
 function getMcpToolGroupKey(name, tool, groupMode) {
@@ -894,6 +953,19 @@ function bindMcpToolListRowEvents(mcpContent) {
     var btn = ev.target && ev.target.closest ? ev.target.closest('button[data-tool-name]') : null;
     if (!btn) return;
     var toolName = btn.getAttribute('data-tool-name');
+    if (btn.classList.contains('ai-req-mcp-tool-copy-prompt-btn')) {
+      var promptText = buildMcpToolCopyPrompt(toolName);
+      if (!promptText) {
+        showToast('工具不存在，无法复制提示词', 2500, 'error');
+        return;
+      }
+      copyTextToClipboard(promptText, function () {
+        showToast('已复制工具提示词', 2000, 'success');
+      }, function () {
+        showToast('复制失败', 2500, 'error');
+      });
+      return;
+    }
     if (btn.classList.contains('ai-req-mcp-tool-unassign-btn')) {
       unassignToolsFromFlow([toolName]);
       refreshMcpToolListViewLocal(mcpContent);

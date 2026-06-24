@@ -408,12 +408,37 @@ function addRequestRecord(record) {
   if (isDuplicateRequestRecord(record)) return;
   state.requestRecords.push(record);
   attachRequestToActiveFlow(record);
+  notifySiteIdentityFromRecord(record);
   if (state.requestRecords.length > MAX_RECORDS) {
     state.requestRecords.shift();
   }
   if (state.isPanelOpen) {
     refreshRequestList();
   }
+}
+
+function isStaticResourceUrl(url) {
+  if (!url || typeof url !== 'string') return true;
+  if (url.indexOf('data:') === 0 || url.indexOf('blob:') === 0) return true;
+  return /\.(js|css|png|jpg|jpeg|gif|svg|woff|woff2|ttf|eot|ico|mp4|mp3|wav|avi|map|webp)(\?|#|$)/i.test(url);
+}
+
+function notifySiteIdentityFromRecord(record) {
+  if (!record) return;
+  var reqUrl = record.originalUrl || record.url || '';
+  if (!reqUrl || isStaticResourceUrl(reqUrl)) return;
+  if (reqUrl.indexOf('api.moonshot.cn') !== -1) return;
+  try {
+    var apiUrl = new URL(reqUrl, location.href);
+    var headers = record.requestHeaders || {};
+    if (!headers || typeof headers !== 'object') return;
+    chrome.runtime.sendMessage({
+      type: 'UPDATE_SITE_IDENTITY',
+      apiHostname: apiUrl.hostname,
+      pageOrigin: location.origin,
+      requestHeaders: headers
+    });
+  } catch (eNotify) {}
 }
 
 function setupRequestInterception() {
